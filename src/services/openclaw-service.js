@@ -249,29 +249,62 @@ function normalizeSystemdState(detail = {}) {
 function parseIsoTimestamp(textInput) {
   const text = String(textInput || '').trim();
   if (!text) return NaN;
-  const time = Date.parse(text);
-  return Number.isFinite(time) ? time : NaN;
-}
 
+  const parsed = Date.parse(text);
+  if (Number.isFinite(parsed)) {
+    const driftMs = parsed - Date.now();
+    // systemd in CN often prints "CST" (China Standard Time), but JS parses CST as UTC-6.
+    // If parsed time is clearly in the future, try a China-time fallback parser.
+    if (driftMs <= 5 * 60 * 1000) {
+      return parsed;
+    }
+  }
+
+  const cstMatch = text.match(/^[A-Za-z]{3}\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\s+CST$/);
+  if (cstMatch) {
+    const [, y, m, d, hh, mm, ss] = cstMatch;
+    // Treat systemd "CST" as Asia/Shanghai (+08:00)
+    return Date.UTC(Number(y), Number(m) - 1, Number(d), Number(hh) - 8, Number(mm), Number(ss));
+  }
+
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
 function inferGatewayStateFromText(textInput) {
   const text = stripAnsi(textInput || '');
   const lower = text.toLowerCase();
+
+  const hasRpcOk = /rpc probe:\s*ok/.test(lower);
+  const hasRpcFail = /rpc probe:\s*(failed|error|unavailable)/.test(lower);
+  const hasHardFailure = /panic|crash|segfault|fatal/.test(lower);
+  const hasListening = /\blistening\b/.test(lower);
+
   let stateCode = STATE_UNKNOWN;
 
-  if (/failed|error|panic|crash/.test(lower)) {
+  if (hasRpcOk || (hasListening && !hasHardFailure && !hasRpcFail)) {
+    stateCode = STATE_RUNNING;
+  } else if (hasHardFailure || hasRpcFail) {
     stateCode = STATE_ERROR;
   } else if (/activating|starting|booting|initializing|reloading/.test(lower)) {
     stateCode = STATE_STARTING;
-  } else if (/active|running|online|listening|ready/.test(lower)) {
-    stateCode = STATE_RUNNING;
   } else if (/inactive|stopped|offline|disabled|dead/.test(lower)) {
     stateCode = STATE_STOPPED;
+  } else if (/active|running|online|ready/.test(lower)) {
+    stateCode = STATE_RUNNING;
   }
 
-  const endpointMatch = text.match(/(wss?:\/\/[^\s"'<>]+|https?:\/\/[^\s"'<>]+)/i);
+  if (stateCode === STATE_ERROR && hasRpcOk) {
+    stateCode = STATE_RUNNING;
+  }
+
+  const endpointMatch =
+    text.match(/(wss?:\/\/[^\s"'<>]+)/i) ||
+    text.match(/(https?:\/\/[^\s"'<>]+)/i);
   const endpoint = endpointMatch ? endpointMatch[1] : '';
 
-  const portMatch = text.match(/\bport\b\s*[:=]\s*(\d{2,5})/i);
+  const portMatch =
+    text.match(/\bport\b\s*[:=]\s*(\d{2,5})/i) ||
+    text.match(/\*:(\d{2,5})/) ||
+    endpoint.match(/:(\d{2,5})(?:\/|$)/);
   const port = portMatch ? Number.parseInt(portMatch[1], 10) : null;
 
   return {
@@ -280,7 +313,6 @@ function inferGatewayStateFromText(textInput) {
     port: Number.isFinite(port) ? port : null
   };
 }
-
 function humanizeRuntimeZh(secondsInput) {
   const totalSeconds = Math.max(0, Math.floor(Number(secondsInput) || 0));
   const month = 30 * 24 * 60 * 60;
