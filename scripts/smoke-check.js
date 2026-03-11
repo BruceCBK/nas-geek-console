@@ -167,6 +167,66 @@ async function main() {
     }
   });
 
+  await check('GET /api/squad/state', async () => {
+    const res = await request('/api/squad/state', { headers: authHeaders() });
+    if (res.status !== 200) {
+      throw new Error(`expected 200, got ${res.status}`);
+    }
+    const data = getData(res.body);
+    if (!Array.isArray(data?.roles) || data.roles.length < 5) {
+      throw new Error('expected seeded squad roles >= 5');
+    }
+  });
+
+  await check('POST /api/squad/task + review + reflection', async () => {
+    const stateRes = await request('/api/squad/state', { headers: authHeaders() });
+    const stateData = getData(stateRes.body);
+    const firstRole = stateData?.roles?.[0];
+    if (!firstRole?.id) throw new Error('missing first role id');
+
+    const createRes = await request('/api/squad/task', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        title: 'smoke squad task',
+        description: 'auto smoke path',
+        roleId: firstRole.id,
+        weight: 1
+      })
+    });
+    if (createRes.status !== 200) {
+      throw new Error(`create task expected 200, got ${createRes.status}`);
+    }
+
+    const taskId = getData(createRes.body)?.task?.id;
+    if (!taskId) throw new Error('missing squad task id');
+
+    const reviewRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/review`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        completion: 88,
+        quality: 90,
+        ownerScore: 89,
+        captainScore: 91,
+        passed: true,
+        reviewNote: 'smoke pass'
+      })
+    });
+    if (reviewRes.status !== 200) {
+      throw new Error(`review task expected 200, got ${reviewRes.status}`);
+    }
+
+    const reflectionRes = await request(`/api/squad/role/${encodeURIComponent(firstRole.id)}/reflection`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ reflection: 'smoke reflection' })
+    });
+    if (reflectionRes.status !== 200) {
+      throw new Error(`reflection expected 200, got ${reflectionRes.status}`);
+    }
+  });
+
   await check('POST /api/auth/logout', async () => {
     const res = await request('/api/auth/logout', {
       method: 'POST',

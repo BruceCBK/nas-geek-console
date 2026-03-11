@@ -19,6 +19,8 @@ const FAVORITES_PATH = path.join(DATA_DIR, 'favorites.json');
 const TOPICS_PATH = path.join(DATA_DIR, 'topics.json');
 const OPERATION_LOG_PATH = path.join(DATA_DIR, 'operation-log.json');
 const MEMORY_INDEX_PATH = path.join(DATA_DIR, 'memory-index.json');
+const SQUAD_ROLES_PATH = path.join(DATA_DIR, 'squad-roles.json');
+const SQUAD_TASKS_PATH = path.join(DATA_DIR, 'squad-tasks.json');
 
 module.exports = {
   PROJECT_ROOT,
@@ -37,5 +39,7 @@ module.exports = {
   FAVORITES_PATH,
   TOPICS_PATH,
   OPERATION_LOG_PATH,
-  MEMORY_INDEX_PATH
+  MEMORY_INDEX_PATH,
+  SQUAD_ROLES_PATH,
+  SQUAD_TASKS_PATH
 };

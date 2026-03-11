@@ -252,7 +252,7 @@ function defaultServiceStatus(openclawService) {
   };
 }
 
-function createDashboardRouter({ authService, openclawService, taskService, logService, memoryService }) {
+function createDashboardRouter({ authService, openclawService, taskService, logService, memoryService, squadService }) {
   const router = express.Router();
 
   router.get(
@@ -264,7 +264,7 @@ function createDashboardRouter({ authService, openclawService, taskService, logS
           ? openclawService.humanizeRuntimeZh(appUptimeSec)
           : `${Math.max(1, Math.floor(appUptimeSec / 60))}分钟`;
 
-      const [statusResult, gatewayProbe, configResult, skillsResult, latestTasks, recentLogs, recentMemory] =
+      const [statusResult, gatewayProbe, configResult, skillsResult, latestTasks, recentLogs, recentMemory, squadState] =
         await Promise.all([
           openclawService.getServiceStatus().catch(() => defaultServiceStatus(openclawService)),
           openclawService
@@ -274,7 +274,8 @@ function createDashboardRouter({ authService, openclawService, taskService, logS
           openclawService.listSkillsRaw().catch(() => ({ rows: [] })),
           taskService.list({ limit: 8 }).catch(() => []),
           logService.list(10).catch(() => []),
-          memoryService.recent(6).catch(() => [])
+          memoryService.recent(6).catch(() => []),
+          squadService?.getState?.().catch(() => ({ roles: [], summary: {} }))
         ]);
 
       const serviceFriendlyStatus =
@@ -344,6 +345,13 @@ function createDashboardRouter({ authService, openclawService, taskService, logS
         else if (state === 'running') skillSummary.running += 1;
         else skillSummary.unknown += 1;
       }
+
+      const squadSummary = {
+        totalRoles: Number(squadState?.summary?.totalRoles) || 0,
+        avgScore: Number(squadState?.summary?.avgScore) || 0,
+        warningRoles: Number(squadState?.summary?.warningRoles) || 0,
+        pendingTasks: Number(squadState?.summary?.pendingTasks) || 0
+      };
 
       const modelSummary = {
         modelPrimary: pickText(configResult?.modelPrimary) || '-',
@@ -433,6 +441,7 @@ function createDashboardRouter({ authService, openclawService, taskService, logS
         serviceFriendlyStatus,
         gatewayStatus,
         modelSummary,
+        squadSummary,
         skillSummary,
         sessionSummary,
         monitorMatrix,

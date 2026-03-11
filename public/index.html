@@ -35,6 +35,7 @@
         <nav class="top-nav-links">
           <button class="nav-btn active" data-view="dashboardView">总览面板</button>
           <button class="nav-btn" data-view="skillsView">Skills 中心</button>
+          <button class="nav-btn" data-view="squadView">龙虾小队</button>
           <button class="nav-btn" data-view="contentView">内容工作台</button>
         </nav>
 
@@ -180,6 +181,75 @@
               <div id="batchResultList" class="list-block"></div>
             </article>
           </section>
+        </section>
+
+
+        <section id="squadView" class="view">
+          <header class="header-row">
+            <h2>龙虾小队 · 多智能体作战台</h2>
+            <div class="actions">
+              <button id="squadRefreshBtn">刷新小队状态</button>
+            </div>
+          </header>
+
+          <section class="two-col">
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>角色状态看板</h3>
+              <div id="squadRoleBoard" class="list-block"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>积分排行榜</h3>
+              <div id="squadLeaderboard" class="list-block"></div>
+            </article>
+          </section>
+
+          <section class="card glow-card lift-card ripple-surface" data-tilt>
+            <h3>任务大厅</h3>
+            <div id="squadTaskBoard" class="list-block"></div>
+          </section>
+
+          <section class="three-col">
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>派发任务</h3>
+              <div class="row"><input id="squadTaskTitleInput" placeholder="任务标题" /></div>
+              <div class="row"><input id="squadTaskDescInput" placeholder="任务说明（可选）" /></div>
+              <div class="row">
+                <select id="squadTaskRoleSelect"></select>
+                <input id="squadTaskWeightInput" type="number" min="1" max="3" value="1" />
+                <button id="squadCreateTaskBtn">创建任务</button>
+              </div>
+            </article>
+
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>任务评分（你+队长）</h3>
+              <div class="row"><input id="squadReviewTaskIdInput" placeholder="任务ID" /></div>
+              <div class="row">
+                <input id="squadReviewCompletionInput" type="number" min="0" max="100" value="85" placeholder="完成度" />
+                <input id="squadReviewQualityInput" type="number" min="0" max="100" value="85" placeholder="质量" />
+              </div>
+              <div class="row">
+                <input id="squadReviewOwnerInput" type="number" min="0" max="100" value="85" placeholder="你的评分" />
+                <input id="squadReviewCaptainInput" type="number" min="0" max="100" value="85" placeholder="队长评分" />
+              </div>
+              <div class="row">
+                <select id="squadReviewPassedSelect">
+                  <option value="true" selected>通过</option>
+                  <option value="false">失败</option>
+                </select>
+                <button id="squadSubmitReviewBtn">提交评分</button>
+              </div>
+              <div class="row"><input id="squadReviewNoteInput" placeholder="评语（可选）" /></div>
+            </article>
+
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>低分自省</h3>
+              <div class="row"><select id="squadReflectionRoleSelect"></select></div>
+              <div class="row"><textarea id="squadReflectionText" class="content-note" placeholder="低于60分必须提交自省与改进计划"></textarea></div>
+              <div class="row"><button id="squadSubmitReflectionBtn">提交自省</button></div>
+            </article>
+          </section>
+
+          <p id="squadMsg" class="msg"></p>
         </section>
 
         <section id="contentView" class="view">

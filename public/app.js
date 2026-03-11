@@ -59,6 +59,28 @@ const dom = {
   skillsOpsProgressBar: document.getElementById('skillsOpsProgressBar'),
   skillsOpsText: document.getElementById('skillsOpsText'),
 
+  squadRefreshBtn: document.getElementById('squadRefreshBtn'),
+  squadRoleBoard: document.getElementById('squadRoleBoard'),
+  squadLeaderboard: document.getElementById('squadLeaderboard'),
+  squadTaskBoard: document.getElementById('squadTaskBoard'),
+  squadTaskTitleInput: document.getElementById('squadTaskTitleInput'),
+  squadTaskDescInput: document.getElementById('squadTaskDescInput'),
+  squadTaskRoleSelect: document.getElementById('squadTaskRoleSelect'),
+  squadTaskWeightInput: document.getElementById('squadTaskWeightInput'),
+  squadCreateTaskBtn: document.getElementById('squadCreateTaskBtn'),
+  squadReviewTaskIdInput: document.getElementById('squadReviewTaskIdInput'),
+  squadReviewCompletionInput: document.getElementById('squadReviewCompletionInput'),
+  squadReviewQualityInput: document.getElementById('squadReviewQualityInput'),
+  squadReviewOwnerInput: document.getElementById('squadReviewOwnerInput'),
+  squadReviewCaptainInput: document.getElementById('squadReviewCaptainInput'),
+  squadReviewPassedSelect: document.getElementById('squadReviewPassedSelect'),
+  squadReviewNoteInput: document.getElementById('squadReviewNoteInput'),
+  squadSubmitReviewBtn: document.getElementById('squadSubmitReviewBtn'),
+  squadReflectionRoleSelect: document.getElementById('squadReflectionRoleSelect'),
+  squadReflectionText: document.getElementById('squadReflectionText'),
+  squadSubmitReflectionBtn: document.getElementById('squadSubmitReflectionBtn'),
+  squadMsg: document.getElementById('squadMsg'),
+
   wechatSearchInput: document.getElementById('wechatSearchInput'),
   wechatSearchBtn: document.getElementById('wechatSearchBtn'),
   refreshTrendingBtn: document.getElementById('refreshTrendingBtn'),
@@ -89,6 +111,13 @@ const state = {
   selectedSkills: new Set(),
   skillsSearchLinks: [],
   batchResults: [],
+
+  squad: {
+    roles: [],
+    tasks: [],
+    summary: {},
+    warningRoles: []
+  },
 
   trendingData: null,
   wechatRecommendations: [],
@@ -129,6 +158,7 @@ function init() {
   renderSkillSearchLinks();
   renderBatchResults();
   renderSkillsOpsStatus();
+  renderSquadState();
   renderDashboardAutoRefreshHint();
   const hintTicker = setInterval(() => {
     if (state.dashboardAuto.enabled) renderDashboardAutoRefreshHint();
@@ -232,6 +262,19 @@ function wireEvents() {
   });
   dom.installSkillZipBtn?.addEventListener('click', () => {
     installSkillZip().catch((err) => setMessage(dom.skillsMsg, err.message, 'error'));
+  });
+
+  dom.squadRefreshBtn?.addEventListener('click', () => {
+    loadSquadState().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+  });
+  dom.squadCreateTaskBtn?.addEventListener('click', () => {
+    createSquadTask().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+  });
+  dom.squadSubmitReviewBtn?.addEventListener('click', () => {
+    submitSquadReview().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+  });
+  dom.squadSubmitReflectionBtn?.addEventListener('click', () => {
+    submitSquadReflection().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
   });
 
   dom.tabButtons.forEach((button) => {
@@ -364,6 +407,7 @@ async function loadInitialData() {
     loadDashboardSummary(),
     loadSkills(),
     loadSkillSearchLinks(),
+    loadSquadState(),
     refreshTrending(),
     fetchWechatRecommendations(false),
     loadContentState()
@@ -1410,6 +1454,272 @@ function renderTopics() {
   });
 
   bindInteractiveSurfaces(dom.topicsList);
+}
+
+
+async function loadSquadState() {
+  const payload = await apiJson('/api/squad/state');
+  state.squad = {
+    roles: toArray(payload.roles),
+    tasks: toArray(payload.tasks),
+    summary: asObject(payload.summary),
+    warningRoles: toArray(payload.warningRoles)
+  };
+  renderSquadState();
+}
+
+function renderSquadState() {
+  renderSquadRoles();
+  renderSquadLeaderboard();
+  renderSquadTasks();
+  renderSquadRoleSelectors();
+}
+
+function renderSquadRoles() {
+  if (!dom.squadRoleBoard) return;
+  dom.squadRoleBoard.innerHTML = '';
+
+  const roles = toArray(state.squad.roles);
+  if (!roles.length) {
+    dom.squadRoleBoard.appendChild(buildEmpty('暂无角色数据'));
+    return;
+  }
+
+  roles.forEach((role) => {
+    const item = document.createElement('div');
+    item.className = 'list-item ripple-surface';
+
+    const line = document.createElement('div');
+    line.className = 'list-line';
+
+    const title = document.createElement('strong');
+    title.textContent = `${pickText(role.name)} (${pickText(role.codename)})`;
+
+    const status = Number(role.score) < 60 ? 'warning' : 'active';
+    const badge = buildBadge(status);
+
+    const meta = document.createElement('small');
+    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)}`;
+
+    const stat = document.createElement('small');
+    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
+
+    line.append(title, badge);
+    item.append(line, meta, stat);
+
+    if (status === 'warning') {
+      const warn = document.createElement('small');
+      warn.className = 'warning-text';
+      warn.textContent = `⚠ 低于60分：${pickText(role.reflection, '需提交自省与改进计划')}`;
+      item.append(warn);
+    }
+
+    dom.squadRoleBoard.appendChild(item);
+  });
+
+  bindInteractiveSurfaces(dom.squadRoleBoard);
+}
+
+function renderSquadLeaderboard() {
+  if (!dom.squadLeaderboard) return;
+  dom.squadLeaderboard.innerHTML = '';
+
+  const roles = toArray(state.squad.roles)
+    .slice()
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+
+  if (!roles.length) {
+    dom.squadLeaderboard.appendChild(buildEmpty('暂无排行数据'));
+    return;
+  }
+
+  roles.forEach((role, idx) => {
+    const item = document.createElement('div');
+    item.className = 'list-item ripple-surface';
+
+    const line = document.createElement('div');
+    line.className = 'list-line';
+
+    const title = document.createElement('strong');
+    title.textContent = `#${idx + 1} ${pickText(role.name)}`;
+
+    const badge = buildBadge(Number(role.score) < 60 ? 'warning' : 'ok');
+    badge.textContent = `${formatNumber(role.score)}分`;
+
+    const meta = document.createElement('small');
+    meta.textContent = `${pickText(role.codename)} · ${pickText(role.vibe)}`;
+
+    line.append(title, badge);
+    item.append(line, meta);
+    dom.squadLeaderboard.appendChild(item);
+  });
+
+  bindInteractiveSurfaces(dom.squadLeaderboard);
+}
+
+function renderSquadTasks() {
+  if (!dom.squadTaskBoard) return;
+  dom.squadTaskBoard.innerHTML = '';
+
+  const tasks = toArray(state.squad.tasks);
+  if (!tasks.length) {
+    dom.squadTaskBoard.appendChild(buildEmpty('暂无任务，先创建一条吧'));
+    return;
+  }
+
+  tasks.slice(0, 25).forEach((task) => {
+    const item = document.createElement('div');
+    item.className = 'list-item ripple-surface';
+
+    const line = document.createElement('div');
+    line.className = 'list-line';
+
+    const title = document.createElement('strong');
+    title.textContent = `${pickText(task.title)} · ${pickText(task.roleName)}`;
+
+    const badge = buildBadge(pickText(task.status, 'pending'));
+
+    const detail = document.createElement('small');
+    detail.textContent = `ID ${pickText(task.id)} · 权重 ${formatNumber(task.weight)} · Δ ${Number(task.scoreDelta) > 0 ? '+' : ''}${formatNumber(task.scoreDelta)}`;
+
+    const judge = document.createElement('small');
+    judge.textContent = `完成度 ${formatNumber(task.completion)}｜质量 ${formatNumber(task.quality)}｜你 ${formatNumber(task.ownerScore)}｜队长 ${formatNumber(task.captainScore)}｜${task.passed ? '通过' : '待评/失败'}`;
+
+    line.append(title, badge);
+    item.append(line, detail, judge);
+
+    if (pickText(task.description)) {
+      const desc = document.createElement('small');
+      desc.textContent = task.description;
+      item.append(desc);
+    }
+
+    dom.squadTaskBoard.appendChild(item);
+  });
+
+  bindInteractiveSurfaces(dom.squadTaskBoard);
+}
+
+function renderSquadRoleSelectors() {
+  const roles = toArray(state.squad.roles);
+  const buildOptions = (el, placeholder) => {
+    if (!el) return;
+    const current = pickText(el.value);
+    el.innerHTML = '';
+    const first = document.createElement('option');
+    first.value = '';
+    first.textContent = placeholder;
+    el.appendChild(first);
+
+    roles.forEach((role) => {
+      const opt = document.createElement('option');
+      opt.value = pickText(role.id);
+      opt.textContent = `${pickText(role.name)} (${pickText(role.codename)})`;
+      el.appendChild(opt);
+    });
+
+    if (current && roles.some((r) => r.id === current)) el.value = current;
+    else if (!current && roles[0]) el.value = roles[0].id;
+  };
+
+  buildOptions(dom.squadTaskRoleSelect, '选择派发角色');
+  buildOptions(dom.squadReflectionRoleSelect, '选择提交自省的角色');
+}
+
+async function createSquadTask() {
+  const title = pickText(dom.squadTaskTitleInput?.value);
+  const roleId = pickText(dom.squadTaskRoleSelect?.value);
+  const description = pickText(dom.squadTaskDescInput?.value);
+  const weight = Number(dom.squadTaskWeightInput?.value || 1);
+
+  if (!title) {
+    setMessage(dom.squadMsg, '请先输入任务标题', 'error');
+    return;
+  }
+  if (!roleId) {
+    setMessage(dom.squadMsg, '请先选择角色', 'error');
+    return;
+  }
+
+  await withButtons([dom.squadCreateTaskBtn], async () => {
+    setMessage(dom.squadMsg, '任务派发中...', 'info', 0);
+    const payload = await apiJson('/api/squad/task', {
+      method: 'POST',
+      body: {
+        title,
+        roleId,
+        description,
+        weight
+      }
+    });
+
+    if (dom.squadTaskTitleInput) dom.squadTaskTitleInput.value = '';
+    if (dom.squadTaskDescInput) dom.squadTaskDescInput.value = '';
+    if (dom.squadReviewTaskIdInput) dom.squadReviewTaskIdInput.value = pickText(payload.task?.id);
+
+    await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+    setMessage(dom.squadMsg, `已派发任务：${title}`, 'success');
+  });
+}
+
+async function submitSquadReview() {
+  const taskId = pickText(dom.squadReviewTaskIdInput?.value);
+  if (!taskId) {
+    setMessage(dom.squadMsg, '请输入任务ID', 'error');
+    return;
+  }
+
+  const completion = Number(dom.squadReviewCompletionInput?.value || 0);
+  const quality = Number(dom.squadReviewQualityInput?.value || 0);
+  const ownerScore = Number(dom.squadReviewOwnerInput?.value || 0);
+  const captainScore = Number(dom.squadReviewCaptainInput?.value || 0);
+  const passed = pickText(dom.squadReviewPassedSelect?.value, 'true') === 'true';
+  const reviewNote = pickText(dom.squadReviewNoteInput?.value);
+
+  await withButtons([dom.squadSubmitReviewBtn], async () => {
+    setMessage(dom.squadMsg, '评分提交中...', 'info', 0);
+    const payload = await apiJson(`/api/squad/task/${encodeURIComponent(taskId)}/review`, {
+      method: 'POST',
+      body: {
+        completion,
+        quality,
+        ownerScore,
+        captainScore,
+        passed,
+        reviewNote
+      }
+    });
+
+    await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+    const roleName = pickText(payload.role?.name, payload.role?.codename, '角色');
+    setMessage(dom.squadMsg, `评分完成：${roleName} 当前 ${formatNumber(payload.role?.score)} 分`, 'success');
+  });
+}
+
+async function submitSquadReflection() {
+  const roleId = pickText(dom.squadReflectionRoleSelect?.value);
+  const reflection = pickText(dom.squadReflectionText?.value);
+
+  if (!roleId) {
+    setMessage(dom.squadMsg, '请选择角色', 'error');
+    return;
+  }
+  if (!reflection) {
+    setMessage(dom.squadMsg, '请填写自省内容', 'error');
+    return;
+  }
+
+  await withButtons([dom.squadSubmitReflectionBtn], async () => {
+    setMessage(dom.squadMsg, '自省提交中...', 'info', 0);
+    await apiJson(`/api/squad/role/${encodeURIComponent(roleId)}/reflection`, {
+      method: 'POST',
+      body: { reflection }
+    });
+
+    if (dom.squadReflectionText) dom.squadReflectionText.value = '';
+    await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+    setMessage(dom.squadMsg, '已提交自省，积分模型已更新', 'success');
+  });
 }
 
 function renderTaskList(container, rows, options = {}) {

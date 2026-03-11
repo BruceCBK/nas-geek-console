@@ -552,6 +552,12 @@ textarea::placeholder {
   color: #ffc0c8;
 }
 
+.badge.warning {
+  background: rgba(255, 149, 64, 0.16);
+  border-color: rgba(255, 149, 64, 0.45);
+  color: #ffd0a8;
+}
+
 .badge.unknown,
 .badge.pending,
 .badge.info,
@@ -780,4 +786,9 @@ textarea::placeholder {
   button {
     transform: none !important;
   }
+}
+
+
+.warning-text {
+  color: #ffd0a8;
 }

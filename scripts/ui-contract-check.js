@@ -23,6 +23,7 @@ const requiredIds = [
   // views
   'dashboardView',
   'skillsView',
+  'squadView',
   'contentView',
 
   // dashboard
@@ -68,6 +69,29 @@ const requiredIds = [
   'skillsOpsProgressBar',
   'skillsOpsText',
 
+  // lobster squad
+  'squadRefreshBtn',
+  'squadRoleBoard',
+  'squadLeaderboard',
+  'squadTaskBoard',
+  'squadTaskTitleInput',
+  'squadTaskDescInput',
+  'squadTaskRoleSelect',
+  'squadTaskWeightInput',
+  'squadCreateTaskBtn',
+  'squadReviewTaskIdInput',
+  'squadReviewCompletionInput',
+  'squadReviewQualityInput',
+  'squadReviewOwnerInput',
+  'squadReviewCaptainInput',
+  'squadReviewPassedSelect',
+  'squadReviewNoteInput',
+  'squadSubmitReviewBtn',
+  'squadReflectionRoleSelect',
+  'squadReflectionText',
+  'squadSubmitReflectionBtn',
+  'squadMsg',
+
   // content studio
   'wechatSearchInput',
   'wechatSearchBtn',
@@ -92,6 +116,8 @@ const requiredAppHooks = [
   'async function restartOpenClawService()',
   'async function stopOpenClawService()',
   'async function loadSkills()',
+  'async function loadSquadState()',
+  'function renderSquadState()',
   'function renderSkillTable()',
   'function renderSkillsOpsStatus()',
   'async function installSkill()',
