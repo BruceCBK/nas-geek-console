@@ -1,0 +1,21 @@
+{
+  "name": "nas-geek-console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw NAS Geek Console MVP",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "verify": "npm run check:ui && npm run smoke && npm run check:memory",
+    "smoke": "node scripts/smoke-check.js",
+    "check:ui": "node scripts/ui-contract-check.js",
+    "check:memory": "node scripts/memory-workspace-check.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

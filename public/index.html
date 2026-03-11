@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw 小龙虾控制台</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="loginOverlay" class="login-overlay">
+      <div class="login-card">
+        <h1>OpenClaw 控制台登录</h1>
+        <p>请输入控制台密码</p>
+        <input id="loginPassword" type="password" placeholder="请输入密码" />
+        <button id="loginBtn">登录</button>
+        <p id="loginMsg" class="msg"></p>
+      </div>
+    </div>
+
+    <canvas id="particleCanvas" class="particle-canvas" aria-hidden="true"></canvas>
+    <div id="mouseGlow" class="mouse-glow" aria-hidden="true"></div>
+
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <div>
+            <h1>OpenClaw Lobster Console</h1>
+            <small>Cyber Telemetry Deck</small>
+          </div>
+        </div>
+
+        <nav class="top-nav-links">
+          <button class="nav-btn active" data-view="dashboardView">总览面板</button>
+          <button class="nav-btn" data-view="skillsView">Skills 中心</button>
+          <button class="nav-btn" data-view="contentView">内容工作台</button>
+        </nav>
+
+        <div class="top-actions">
+          <small id="lanHint">LAN: -</small>
+          <button id="logoutBtn" class="ghost">退出登录</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <section id="dashboardView" class="view active">
+          <header class="header-row">
+            <h2>总览面板 · 小龙虾遥测矩阵</h2>
+            <div class="actions dashboard-actions">
+              <label class="inline-toggle" for="dashboardAutoRefreshToggle">
+                <input id="dashboardAutoRefreshToggle" type="checkbox" checked />
+                自动刷新
+              </label>
+              <select id="dashboardAutoRefreshInterval" aria-label="自动刷新间隔">
+                <option value="15000">15秒</option>
+                <option value="30000" selected>30秒</option>
+                <option value="60000">60秒</option>
+              </select>
+              <small id="dashboardAutoRefreshHint">自动刷新：30秒</small>
+              <button id="dashboardRefreshBtn">状态探测</button>
+            </div>
+          </header>
+
+          <section class="card glow-card lift-card ripple-surface monitor-hero" data-tilt>
+            <h3>OpenClaw 服务状态</h3>
+            <pre id="healthCard" class="mono">状态加载中...</pre>
+            <div class="quick-actions">
+              <button id="quickServiceStartBtn">引擎启动</button>
+              <button id="quickServiceRestartBtn">设备重启</button>
+              <button id="quickServiceStopBtn" class="danger">系统停止</button>
+              <button id="quickServiceStatusBtn" class="ghost">状态同步</button>
+            </div>
+            <p id="dashboardMsg" class="msg"></p>
+          </section>
+
+          <section class="cards-grid monitor-grid">
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>模型与运行时</h4>
+              <div id="modelSummaryCard" class="kv-list"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>Skills 概览</h4>
+              <div id="skillsSummaryCard" class="kv-list"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>Gateway 状态</h4>
+              <div id="gatewaySummaryCard" class="kv-list"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>会话与运行摘要</h4>
+              <div id="runtimeSummaryCard" class="kv-list"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>V3 融合信号</h4>
+              <div id="fusionSummaryCard" class="kv-list"></div>
+            </article>
+          </section>
+
+          <section class="three-col">
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>最近任务</h4>
+              <div id="dashboardRecentTasks" class="list-block"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>最近日志</h4>
+              <div id="dashboardRecentLogs" class="list-block"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>最近变更</h4>
+              <div id="dashboardRecentChanges" class="list-block"></div>
+            </article>
+          </section>
+
+          <section class="two-col">
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>V3 风险告警</h4>
+              <div id="dashboardFusionAlerts" class="list-block"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h4>V3 自动迭代建议</h4>
+              <div id="dashboardActionPlan" class="list-block"></div>
+            </article>
+          </section>
+        </section>
+
+        <section id="skillsView" class="view">
+          <header class="header-row">
+            <h2>Skills 中心</h2>
+            <div class="actions">
+              <input id="skillsSearchInput" placeholder="搜索 skill slug" />
+              <select id="skillsStatusFilter">
+                <option value="all">全部状态</option>
+                <option value="ok">正常</option>
+                <option value="error">异常</option>
+                <option value="running">运行中</option>
+                <option value="unknown">未知</option>
+              </select>
+              <button id="skillsSearchBtn">搜索</button>
+              <button id="refreshSkillsBtn">刷新</button>
+            </div>
+          </header>
+
+          <section class="card glow-card lift-card ripple-surface" data-tilt>
+            <h3>操作区</h3>
+            <div id="skillsOpsStatus" class="ops-status" role="status" aria-live="polite">
+              <div class="ops-track"><span id="skillsOpsProgressBar"></span></div>
+              <small id="skillsOpsText">待命</small>
+            </div>
+            <div class="row">
+              <input id="skillSlugInput" placeholder="skill slug，如 weather" />
+              <button id="installSkillBtn">安装</button>
+              <button id="updateSkillBtn">更新</button>
+              <button id="removeSkillBtn" class="danger">卸载</button>
+              <button id="updateAllSkillsBtn" class="ghost">更新全部</button>
+            </div>
+            <div class="row">
+              <button id="batchUpdateBtn" class="ghost">批量更新选中项</button>
+            </div>
+            <div class="row">
+              <input id="skillZipInput" type="file" accept=".zip" />
+              <button id="installSkillZipBtn">上传 ZIP 安装</button>
+            </div>
+            <p id="skillsMsg" class="msg"></p>
+          </section>
+
+          <section class="card glow-card lift-card ripple-surface" data-tilt>
+            <h3>Skills 列表</h3>
+            <div id="skillsList" class="table-list"></div>
+          </section>
+
+          <section class="two-col">
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>官网搜索结果（直达链接）</h3>
+              <div id="skillsSearchLinks" class="list-block"></div>
+            </article>
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>批量结果</h3>
+              <div id="batchResultList" class="list-block"></div>
+            </article>
+          </section>
+        </section>
+
+        <section id="contentView" class="view">
+          <header class="header-row">
+            <h2>内容工作台</h2>
+            <div class="actions">
+              <input id="wechatSearchInput" placeholder="关键词，例如：免费工具 测评" />
+              <button id="wechatSearchBtn">搜索公众号推荐</button>
+              <button id="refreshTrendingBtn" class="ghost">刷新热门</button>
+            </div>
+          </header>
+
+          <section class="two-col">
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>推荐内容</h3>
+              <div class="tabs">
+                <button class="tab-btn active" data-tab="wechat">公众号</button>
+                <button class="tab-btn" data-tab="feishu">飞书</button>
+                <button class="tab-btn" data-tab="xiaohongshu">小红书</button>
+              </div>
+              <p id="contentMsg" class="msg"></p>
+              <div id="contentList" class="content-list"></div>
+            </article>
+
+            <article class="card glow-card lift-card ripple-surface" data-tilt>
+              <h3>收藏与选题</h3>
+              <h4>收藏</h4>
+              <div id="favoritesList" class="list-block"></div>
+              <h4>选题</h4>
+              <div id="topicsList" class="list-block"></div>
+            </article>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
