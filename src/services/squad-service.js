@@ -3,6 +3,7 @@ const { HttpError } = require('../utils/http-error');
 const { nowIso, pickText, toArray } = require('../utils/text');
 
 const BASE_SCORE = 100;
+const MAX_SCORE = 100;
 const WARNING_SCORE = 60;
 
 const DEFAULT_ROLES = [
@@ -86,6 +87,22 @@ class SquadService {
   async init() {
     await Promise.all([this.roleStore.init(), this.taskStore.init()]);
     await this._ensureSeed();
+    await this._normalizeRoleScores();
+  }
+
+
+  async _normalizeRoleScores() {
+    await this.roleStore.update((rows) => {
+      return toArray(rows).map((role) => {
+        const score = clamp(role?.score, 0, MAX_SCORE);
+        const status = score < WARNING_SCORE ? 'warning' : 'active';
+        return {
+          ...role,
+          score,
+          status
+        };
+      });
+    });
   }
 
   async _ensureSeed() {
@@ -242,7 +259,7 @@ class SquadService {
     const roleTasks = taskRows.filter((t) => t && t.roleId === role.id);
     const doneTasks = roleTasks.filter((t) => t.status === 'completed');
     const failedTasks = roleTasks.filter((t) => t.status === 'failed');
-    const score = clamp((Number(role.score) || BASE_SCORE) + delta, 0, 150);
+    const score = clamp((Number(role.score) || BASE_SCORE) + delta, 0, MAX_SCORE);
     const status = score < WARNING_SCORE ? 'warning' : 'active';
 
     const reflection =
@@ -301,7 +318,7 @@ class SquadService {
 
       const current = list[idx] || {};
       const rebound = current.status === 'warning' ? 2 : 0;
-      const nextScore = clamp((Number(current.score) || BASE_SCORE) + rebound, 0, 150);
+      const nextScore = clamp((Number(current.score) || BASE_SCORE) + rebound, 0, MAX_SCORE);
       const next = {
         ...current,
         reflection,
@@ -331,5 +348,6 @@ module.exports = {
   SquadService,
   DEFAULT_ROLES,
   BASE_SCORE,
+  MAX_SCORE,
   WARNING_SCORE
 };
