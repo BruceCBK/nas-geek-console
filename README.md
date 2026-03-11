@@ -49,6 +49,16 @@ npm run check:memory
 npm run verify
 ```
 
+## Security Guardrails
+
+```bash
+npm run hooks:install        # install pre-commit secret scan hook
+npm run check:secrets        # full tracked-files scan
+npm run check:secrets:staged # staged-files scan
+```
+
+See [SECURITY.md](./SECURITY.md) for reporting and secret-handling policy.
+
 ## 目录结构
 
 ```text

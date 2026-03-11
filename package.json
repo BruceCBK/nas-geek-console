@@ -13,7 +13,10 @@
     "verify": "npm run check:ui && npm run smoke && npm run check:memory",
     "smoke": "node scripts/smoke-check.js",
     "check:ui": "node scripts/ui-contract-check.js",
-    "check:memory": "node scripts/memory-workspace-check.js"
+    "check:memory": "node scripts/memory-workspace-check.js",
+    "check:secrets": "node scripts/secret-scan.js --all",
+    "check:secrets:staged": "node scripts/secret-scan.js --staged",
+    "hooks:install": "git config core.hooksPath .githooks && chmod +x .githooks/pre-commit"
   },
   "dependencies": {
     "express": "^4.21.2"

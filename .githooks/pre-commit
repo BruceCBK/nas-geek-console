@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[pre-commit] running staged secret scan..."
+node scripts/secret-scan.js --staged
