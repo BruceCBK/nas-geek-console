@@ -20,6 +20,9 @@ const COLLAB_POLICY = {
   'ops-tide': ['radar-qa', 'doc-pulse'],
   'radar-qa': ['doc-pulse']
 };
+const TASK_OPEN_STATUSES = new Set(['pending', 'running', 'blocked']);
+const TASK_TERMINAL_STATUSES = new Set(['completed', 'failed']);
+const TASK_RUNNING_STALE_MS = 8 * 60 * 1000;
 
 const DEFAULT_ROLES = [
   {
@@ -116,7 +119,7 @@ function buildRoleLoadMap(tasks = []) {
     const createdAt = pickText(row?.createdAt);
 
     current.total += 1;
-    if (!status || status === 'pending' || status === 'running') current.pending += 1;
+    if (!status || TASK_OPEN_STATUSES.has(status)) current.pending += 1;
     if (createdAt && (!current.lastAssignedAt || createdAt > current.lastAssignedAt)) {
       current.lastAssignedAt = createdAt;
     }
@@ -256,6 +259,7 @@ function buildTaskRow({
   parentTaskId,
   relationType = 'primary'
 }) {
+  const ts = nowIso();
   return {
     id: id || crypto.randomUUID(),
     title,
@@ -268,7 +272,12 @@ function buildTaskRow({
     parentTaskId: pickText(parentTaskId),
     relationType,
     weight,
-    status: 'pending',
+    status: 'running',
+    progressPercent: 5,
+    startedAt: ts,
+    lastHeartbeatAt: ts,
+    stalledAt: '',
+    stalledReason: '',
     completion: 0,
     quality: 0,
     ownerScore: 0,
@@ -276,7 +285,7 @@ function buildTaskRow({
     passed: false,
     scoreDelta: 0,
     reviewNote: '',
-    createdAt: nowIso(),
+    createdAt: ts,
     gradedAt: ''
   };
 }
@@ -314,6 +323,7 @@ class SquadService {
     await Promise.all([this.roleStore.init(), this.taskStore.init()]);
     await this._ensureSeed();
     await this._normalizeRoleScores();
+    await this._normalizeTaskRuntime();
   }
 
   async _normalizeRoleScores() {
@@ -339,7 +349,55 @@ class SquadService {
     await this.roleStore.write(seeded);
   }
 
+  async _normalizeTaskRuntime() {
+    const nowMs = Date.now();
+    const nowText = nowIso();
+
+    await this.taskStore.update((rows) => {
+      return toArray(rows).map((task) => {
+        if (!task || typeof task !== 'object') return task;
+
+        const next = { ...task };
+        const status = pickText(next.status).toLowerCase();
+
+        if (!status || status === 'pending') {
+          next.status = 'running';
+        }
+
+        const normalized = pickText(next.status).toLowerCase();
+        if (!TASK_OPEN_STATUSES.has(normalized)) {
+          if (TASK_TERMINAL_STATUSES.has(normalized)) {
+            next.progressPercent = 100;
+          }
+          return next;
+        }
+
+        next.startedAt = pickText(next.startedAt, next.createdAt, nowText);
+        next.lastHeartbeatAt = pickText(next.lastHeartbeatAt, next.startedAt, next.createdAt, nowText);
+
+        const hbMs = Date.parse(next.lastHeartbeatAt);
+        if (Number.isFinite(hbMs) && nowMs - hbMs > TASK_RUNNING_STALE_MS) {
+          next.status = 'blocked';
+          next.stalledAt = pickText(next.stalledAt, nowText);
+          next.stalledReason = pickText(
+            next.stalledReason,
+            '超过8分钟无进展心跳，状态已标记为 blocked，请跟进或重派。'
+          );
+        }
+
+        const progress = clamp(next.progressPercent, 0, 99);
+        next.progressPercent = next.status === 'blocked' ? progress : Math.max(progress, 5);
+        return next;
+      });
+    });
+  }
+
+  async _reconcileTaskLiveness() {
+    await this._normalizeTaskRuntime();
+  }
+
   async getState() {
+    await this._reconcileTaskLiveness();
     const [roles, tasks] = await Promise.all([this.roleStore.read(), this.taskStore.read()]);
     const roleRows = toArray(roles);
     const taskRows = toArray(tasks);
@@ -348,7 +406,7 @@ class SquadService {
       const roleTasks = taskRows.filter((task) => task && task.roleId === role.id);
       const doneTasks = roleTasks.filter((task) => task.status === 'completed');
       const failedTasks = roleTasks.filter((task) => task.status === 'failed');
-      const pendingTasks = roleTasks.filter((task) => task.status === 'pending');
+      const pendingTasks = roleTasks.filter((task) => TASK_OPEN_STATUSES.has(pickText(task.status).toLowerCase()));
       return {
         ...role,
         totalTasks: roleTasks.length,
@@ -372,7 +430,7 @@ class SquadService {
       totalTasks: taskRows.length,
       completedTasks: taskRows.filter((t) => t.status === 'completed').length,
       failedTasks: taskRows.filter((t) => t.status === 'failed').length,
-      pendingTasks: taskRows.filter((t) => t.status === 'pending').length
+      pendingTasks: taskRows.filter((t) => TASK_OPEN_STATUSES.has(pickText(t.status).toLowerCase())).length
     };
 
     return {
@@ -396,6 +454,7 @@ class SquadService {
     const weight = clamp(input.weight, 1, 3);
 
     if (!title) throw new HttpError(400, 'SQUAD_TASK_TITLE_REQUIRED', '任务标题不能为空');
+    await this._reconcileTaskLiveness();
     const [roles, tasks] = await Promise.all([this.roleStore.read(), this.taskStore.read()]);
     const roleRows = toArray(roles);
     const assignment = resolveRoleAssignment({
@@ -514,6 +573,10 @@ class SquadService {
         captainScore,
         passed,
         status: passed ? 'completed' : 'failed',
+        progressPercent: 100,
+        lastHeartbeatAt: nowIso(),
+        stalledAt: '',
+        stalledReason: '',
         reviewNote,
         gradedAt: nowIso()
       };
@@ -591,6 +654,56 @@ class SquadService {
       task: { ...updatedTask, scoreDelta: delta },
       role: patchedRole
     };
+  }
+
+  async heartbeatTask(taskId, payload = {}) {
+    const id = pickText(taskId);
+    if (!id) throw new HttpError(400, 'SQUAD_TASK_ID_REQUIRED', 'taskId 不能为空');
+
+    const progressPercent = clamp(payload.progressPercent ?? payload.progress, 0, 99);
+    const note = pickText(payload.note, payload.message);
+
+    let updatedTask = null;
+    await this.taskStore.update((rows) => {
+      const list = toArray(rows);
+      const idx = list.findIndex((t) => t && t.id === id);
+      if (idx < 0) throw new HttpError(404, 'SQUAD_TASK_NOT_FOUND', `未找到任务: ${id}`);
+
+      const current = list[idx] || {};
+      const status = pickText(current.status).toLowerCase();
+      if (TASK_TERMINAL_STATUSES.has(status)) {
+        throw new HttpError(409, 'SQUAD_TASK_TERMINAL', '任务已结束，无法提交心跳');
+      }
+
+      const next = {
+        ...current,
+        status: 'running',
+        startedAt: pickText(current.startedAt, current.createdAt, nowIso()),
+        lastHeartbeatAt: nowIso(),
+        progressPercent: Math.max(clamp(current.progressPercent, 0, 99), progressPercent, 5),
+        stalledAt: '',
+        stalledReason: '',
+        progressNote: note || pickText(current.progressNote)
+      };
+      list[idx] = next;
+      updatedTask = next;
+      return list;
+    });
+
+    await this.logService.append({
+      action: 'squad.task.heartbeat',
+      type: 'squad',
+      target: updatedTask.roleId,
+      status: 'success',
+      message: `${updatedTask.roleName} 更新任务心跳：${updatedTask.title}`,
+      meta: {
+        taskId: updatedTask.id,
+        progressPercent: updatedTask.progressPercent,
+        progressNote: pickText(updatedTask.progressNote)
+      }
+    });
+
+    return updatedTask;
   }
 
   async submitReflection(roleId, reflectionText) {

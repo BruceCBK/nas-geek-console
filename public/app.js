@@ -1584,7 +1584,18 @@ function renderSquadTasks() {
     detail.textContent = `ID ${pickText(task.id)} · ${relation} · 权重 ${formatNumber(task.weight)} · Δ ${Number(task.scoreDelta) > 0 ? '+' : ''}${formatNumber(task.scoreDelta)}`;
 
     const judge = document.createElement('small');
-    judge.textContent = `完成度 ${formatNumber(task.completion)}｜质量 ${formatNumber(task.quality)}｜你 ${formatNumber(task.ownerScore)}｜队长 ${formatNumber(task.captainScore)}｜${task.passed ? '通过' : '待评/失败'}`;
+    const taskStatus = pickText(task.status, 'pending').toLowerCase();
+    const reviewText =
+      taskStatus === 'completed'
+        ? '已通过'
+        : taskStatus === 'failed'
+          ? '已失败'
+          : taskStatus === 'blocked'
+            ? '已阻塞'
+            : taskStatus === 'running'
+              ? '进行中'
+              : '待处理';
+    judge.textContent = `进度 ${formatNumber(task.progressPercent)}%｜完成度 ${formatNumber(task.completion)}｜质量 ${formatNumber(task.quality)}｜${reviewText}`;
 
     line.append(title, badge);
     item.append(line, detail, judge);
@@ -1600,6 +1611,19 @@ function renderSquadTasks() {
       reason.textContent = `路由依据：${task.assignmentReason}`;
       item.append(reason);
     }
+
+    const runtime = document.createElement('small');
+    const heartbeatLagMs = Date.now() - parseDateMs(pickText(task.lastHeartbeatAt, task.createdAt));
+    const heartbeatLagMin = heartbeatLagMs > 0 ? Math.floor(heartbeatLagMs / 60000) : 0;
+    const runtimeParts = [
+      `开始 ${formatTime(task.startedAt || task.createdAt)}`,
+      `最近心跳 ${formatTime(task.lastHeartbeatAt || task.createdAt)}`,
+      `静默 ${heartbeatLagMin} 分钟`
+    ];
+    if (pickText(task.stalledReason)) runtimeParts.push(`阻塞原因：${pickText(task.stalledReason)}`);
+    if (pickText(task.progressNote)) runtimeParts.push(`进展：${pickText(task.progressNote)}`);
+    runtime.textContent = runtimeParts.join('｜');
+    item.append(runtime);
 
     dom.squadTaskBoard.appendChild(item);
   });

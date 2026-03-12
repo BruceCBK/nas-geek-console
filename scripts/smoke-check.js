@@ -213,6 +213,25 @@ async function main() {
     if (!linkedTasks.some((row) => row?.roleId === 'radar-qa')) {
       throw new Error('expected linked collaboration task for radar-qa');
     }
+    if (createdTask?.status !== 'running') {
+      throw new Error(`expected created task status=running, got ${createdTask?.status || '-'}`);
+    }
+
+    const heartbeatRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/heartbeat`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ progressPercent: 42, note: 'smoke heartbeat' })
+    });
+    if (heartbeatRes.status !== 200) {
+      throw new Error(`heartbeat expected 200, got ${heartbeatRes.status}`);
+    }
+    const heartbeatTask = getData(heartbeatRes.body)?.task;
+    if (heartbeatTask?.status !== 'running') {
+      throw new Error(`expected heartbeat task status=running, got ${heartbeatTask?.status || '-'}`);
+    }
+    if (Number(heartbeatTask?.progressPercent) < 42) {
+      throw new Error(`expected heartbeat progress >= 42, got ${heartbeatTask?.progressPercent || '-'}`);
+    }
 
     const reviewRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/review`, {
       method: 'POST',

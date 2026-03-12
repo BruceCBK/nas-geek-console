@@ -55,6 +55,19 @@ function createSquadRouter({ squadService }) {
   );
 
   router.post(
+    '/task/:id/heartbeat',
+    asyncHandler(async (req, res) => {
+      const task = await squadService.heartbeatTask(req.params.id, {
+        progressPercent: req.body?.progressPercent,
+        progress: req.body?.progress,
+        note: req.body?.note,
+        message: req.body?.message
+      });
+      return sendSuccess(res, { task }, { legacy: { task } });
+    })
+  );
+
+  router.post(
     '/role/:id/reflection',
     asyncHandler(async (req, res) => {
       const role = await squadService.submitReflection(

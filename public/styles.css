@@ -552,7 +552,8 @@ textarea::placeholder {
   color: #ffc0c8;
 }
 
-.badge.warning {
+.badge.warning,
+.badge.blocked {
   background: rgba(255, 149, 64, 0.16);
   border-color: rgba(255, 149, 64, 0.45);
   color: #ffd0a8;
