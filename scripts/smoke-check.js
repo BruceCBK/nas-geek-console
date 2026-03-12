@@ -178,19 +178,20 @@ async function main() {
     }
   });
 
-  await check('POST /api/squad/task + review + reflection', async () => {
+  await check('POST /api/squad/task auto-route(code) + review + reflection', async () => {
     const stateRes = await request('/api/squad/state', { headers: authHeaders() });
     const stateData = getData(stateRes.body);
-    const firstRole = stateData?.roles?.[0];
-    if (!firstRole?.id) throw new Error('missing first role id');
+    if (!Array.isArray(stateData?.roles) || stateData.roles.length === 0) {
+      throw new Error('missing squad roles');
+    }
 
     const createRes = await request('/api/squad/task', {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({
-        title: 'smoke squad task',
-        description: 'auto smoke path',
-        roleId: firstRole.id,
+        title: 'fix login bug in code path',
+        description: 'dev refactor to fix regression',
+        roleId: 'auto',
         weight: 1
       })
     });
@@ -198,8 +199,15 @@ async function main() {
       throw new Error(`create task expected 200, got ${createRes.status}`);
     }
 
-    const taskId = getData(createRes.body)?.task?.id;
+    const createdTask = getData(createRes.body)?.task;
+    const taskId = createdTask?.id;
     if (!taskId) throw new Error('missing squad task id');
+    if (createdTask?.roleId !== 'code-claw') {
+      throw new Error(`expected auto-route to code-claw, got ${createdTask?.roleId || '-'}`);
+    }
+    if (!createdTask?.assignmentReason) {
+      throw new Error('missing assignmentReason in squad task payload');
+    }
 
     const reviewRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/review`, {
       method: 'POST',
@@ -217,11 +225,14 @@ async function main() {
       throw new Error(`review task expected 200, got ${reviewRes.status}`);
     }
 
-    const reflectionRes = await request(`/api/squad/role/${encodeURIComponent(firstRole.id)}/reflection`, {
+    const reflectionRes = await request(
+      `/api/squad/role/${encodeURIComponent(createdTask.roleId)}/reflection`,
+      {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({ reflection: 'smoke reflection' })
-    });
+    }
+    );
     if (reflectionRes.status !== 200) {
       throw new Error(`reflection expected 200, got ${reflectionRes.status}`);
     }

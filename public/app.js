@@ -1594,6 +1594,12 @@ function renderSquadTasks() {
       item.append(desc);
     }
 
+    if (pickText(task.assignmentReason)) {
+      const reason = document.createElement('small');
+      reason.textContent = `路由依据：${task.assignmentReason}`;
+      item.append(reason);
+    }
+
     dom.squadTaskBoard.appendChild(item);
   });
 
@@ -1602,42 +1608,64 @@ function renderSquadTasks() {
 
 function renderSquadRoleSelectors() {
   const roles = toArray(state.squad.roles);
-  const buildOptions = (el, placeholder) => {
-    if (!el) return;
-    const current = pickText(el.value);
-    el.innerHTML = '';
-    const first = document.createElement('option');
-    first.value = '';
-    first.textContent = placeholder;
-    el.appendChild(first);
+
+  if (dom.squadTaskRoleSelect) {
+    const current = pickText(dom.squadTaskRoleSelect.value);
+    dom.squadTaskRoleSelect.innerHTML = '';
+
+    const autoOpt = document.createElement('option');
+    autoOpt.value = 'auto';
+    autoOpt.textContent = '自动路由（关键词 + 负载）';
+    dom.squadTaskRoleSelect.appendChild(autoOpt);
 
     roles.forEach((role) => {
       const opt = document.createElement('option');
       opt.value = pickText(role.id);
       opt.textContent = `${pickText(role.name)} (${pickText(role.codename)})`;
-      el.appendChild(opt);
+      dom.squadTaskRoleSelect.appendChild(opt);
     });
 
-    if (current && roles.some((r) => r.id === current)) el.value = current;
-    else if (!current && roles[0]) el.value = roles[0].id;
-  };
+    if (current === 'auto' || !current) {
+      dom.squadTaskRoleSelect.value = 'auto';
+    } else if (roles.some((r) => r.id === current)) {
+      dom.squadTaskRoleSelect.value = current;
+    } else {
+      dom.squadTaskRoleSelect.value = 'auto';
+    }
+  }
 
-  buildOptions(dom.squadTaskRoleSelect, '选择派发角色');
-  buildOptions(dom.squadReflectionRoleSelect, '选择提交自省的角色');
+  if (dom.squadReflectionRoleSelect) {
+    const current = pickText(dom.squadReflectionRoleSelect.value);
+    dom.squadReflectionRoleSelect.innerHTML = '';
+
+    const first = document.createElement('option');
+    first.value = '';
+    first.textContent = '选择提交自省的角色';
+    dom.squadReflectionRoleSelect.appendChild(first);
+
+    roles.forEach((role) => {
+      const opt = document.createElement('option');
+      opt.value = pickText(role.id);
+      opt.textContent = `${pickText(role.name)} (${pickText(role.codename)})`;
+      dom.squadReflectionRoleSelect.appendChild(opt);
+    });
+
+    if (current && roles.some((r) => r.id === current)) {
+      dom.squadReflectionRoleSelect.value = current;
+    } else if (!current && roles[0]) {
+      dom.squadReflectionRoleSelect.value = roles[0].id;
+    }
+  }
 }
 
 async function createSquadTask() {
   const title = pickText(dom.squadTaskTitleInput?.value);
-  const roleId = pickText(dom.squadTaskRoleSelect?.value);
+  const roleId = pickText(dom.squadTaskRoleSelect?.value, 'auto');
   const description = pickText(dom.squadTaskDescInput?.value);
   const weight = Number(dom.squadTaskWeightInput?.value || 1);
 
   if (!title) {
     setMessage(dom.squadMsg, '请先输入任务标题', 'error');
-    return;
-  }
-  if (!roleId) {
-    setMessage(dom.squadMsg, '请先选择角色', 'error');
     return;
   }
 
@@ -1658,7 +1686,12 @@ async function createSquadTask() {
     if (dom.squadReviewTaskIdInput) dom.squadReviewTaskIdInput.value = pickText(payload.task?.id);
 
     await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
-    setMessage(dom.squadMsg, `已派发任务：${title}`, 'success');
+    const routedRole = pickText(payload.task?.roleName, payload.task?.roleId, '自动路由');
+    const routedReason = pickText(payload.task?.assignmentReason);
+    const resultText = routedReason
+      ? `已派发任务：${title} -> ${routedRole}（${routedReason}）`
+      : `已派发任务：${title} -> ${routedRole}`;
+    setMessage(dom.squadMsg, resultText, 'success');
   });
 }
 

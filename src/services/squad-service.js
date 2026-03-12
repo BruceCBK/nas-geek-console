@@ -5,6 +5,14 @@ const { nowIso, pickText, toArray } = require('../utils/text');
 const BASE_SCORE = 100;
 const MAX_SCORE = 100;
 const WARNING_SCORE = 60;
+const AUTO_ROLE_ID = 'auto';
+const AUTO_ROLE_KEYWORDS = {
+  'code-claw': ['code', 'dev', 'bug', 'fix', 'refactor'],
+  'radar-qa': ['test', 'qa', 'regression'],
+  'ops-tide': ['deploy', 'restart', 'ops', 'perf'],
+  'doc-pulse': ['doc', 'readme', 'changelog'],
+  'neon-scout': ['research', 'search', 'info']
+};
 
 const DEFAULT_ROLES = [
   {
@@ -54,6 +62,129 @@ function avg(nums = []) {
   const list = nums.filter((v) => Number.isFinite(v));
   if (!list.length) return 0;
   return list.reduce((s, n) => s + n, 0) / list.length;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findKeywordMatches(text, keywords = []) {
+  const source = pickText(text).toLowerCase();
+  if (!source) return [];
+
+  return keywords.filter((keyword) => {
+    const token = pickText(keyword).toLowerCase();
+    if (!token) return false;
+    const pattern = new RegExp(`\\b${escapeRegExp(token)}[a-z0-9-]*\\b`, 'i');
+    return pattern.test(source);
+  });
+}
+
+function getLoad(loadMap, roleId) {
+  return loadMap.get(roleId) || { pending: 0, total: 0, lastAssignedAt: '' };
+}
+
+function buildRoleLoadMap(tasks = []) {
+  const map = new Map();
+  for (const row of toArray(tasks)) {
+    const roleId = pickText(row?.roleId);
+    if (!roleId) continue;
+
+    const current = getLoad(map, roleId);
+    const status = pickText(row?.status).toLowerCase();
+    const createdAt = pickText(row?.createdAt);
+
+    current.total += 1;
+    if (!status || status === 'pending' || status === 'running') current.pending += 1;
+    if (createdAt && (!current.lastAssignedAt || createdAt > current.lastAssignedAt)) {
+      current.lastAssignedAt = createdAt;
+    }
+
+    map.set(roleId, current);
+  }
+  return map;
+}
+
+function pickLeastLoadedRole(candidates = [], loadMap = new Map()) {
+  if (!candidates.length) return null;
+  return candidates
+    .slice()
+    .sort((a, b) => {
+      const left = getLoad(loadMap, a.id);
+      const right = getLoad(loadMap, b.id);
+
+      if (left.pending !== right.pending) return left.pending - right.pending;
+      if (left.total !== right.total) return left.total - right.total;
+
+      const leftTs = pickText(left.lastAssignedAt);
+      const rightTs = pickText(right.lastAssignedAt);
+      if (leftTs !== rightTs) {
+        if (!leftTs) return -1;
+        if (!rightTs) return 1;
+        return leftTs.localeCompare(rightTs);
+      }
+
+      return pickText(a.id).localeCompare(pickText(b.id));
+    })[0];
+}
+
+function describeLoad(load = {}) {
+  return `pending=${Number(load.pending) || 0}, total=${Number(load.total) || 0}`;
+}
+
+function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title, description }) {
+  const roleRows = toArray(roles);
+  if (!roleRows.length) {
+    throw new HttpError(503, 'SQUAD_ROLE_EMPTY', '暂无可用角色');
+  }
+
+  const requested = pickText(requestedRoleId);
+  const normalizedRequest = requested.toLowerCase();
+  const loadMap = buildRoleLoadMap(tasks);
+
+  if (requested && normalizedRequest !== AUTO_ROLE_ID) {
+    const manualRole = roleRows.find((r) => r.id === requested);
+    if (!manualRole) throw new HttpError(404, 'SQUAD_ROLE_NOT_FOUND', `未找到角色: ${requested}`);
+    const manualLoad = getLoad(loadMap, manualRole.id);
+    return {
+      role: manualRole,
+      assignmentMode: 'manual',
+      assignmentReason: `manual roleId=${manualRole.id}; ${describeLoad(manualLoad)}`
+    };
+  }
+
+  const source = `${pickText(title)} ${pickText(description)}`.trim().toLowerCase();
+  const scored = roleRows
+    .map((role) => {
+      const keywords = AUTO_ROLE_KEYWORDS[pickText(role.id)] || [];
+      const matches = findKeywordMatches(source, keywords);
+      return { role, matches };
+    })
+    .filter((row) => row.matches.length > 0);
+
+  if (scored.length > 0) {
+    const maxHits = Math.max(...scored.map((row) => row.matches.length));
+    const candidates = scored.filter((row) => row.matches.length === maxHits);
+    const picked = pickLeastLoadedRole(
+      candidates.map((row) => row.role),
+      loadMap
+    );
+    const pickedRow = candidates.find((row) => row.role.id === picked?.id);
+    const pickedLoad = getLoad(loadMap, picked.id);
+    return {
+      role: picked,
+      assignmentMode: 'auto.keyword',
+      assignmentReason: `auto keyword[${pickedRow?.matches?.join(', ') || ''}] -> ${picked.id}; ${describeLoad(pickedLoad)}`
+    };
+  }
+
+  const picked = pickLeastLoadedRole(roleRows, loadMap);
+  const pickedLoad = getLoad(loadMap, picked.id);
+  return {
+    role: picked,
+    assignmentMode: 'auto.balance',
+    assignmentReason: `auto balance(no keyword) -> ${picked.id}; ${describeLoad(pickedLoad)}`
+  };
 }
 
 function roleTemplate(base = {}) {
@@ -148,23 +279,29 @@ class SquadService {
 
   async createTask(input = {}) {
     const title = pickText(input.title);
-    const roleId = pickText(input.roleId);
+    const requestedRoleId = pickText(input.roleId);
     const description = pickText(input.description);
     const weight = clamp(input.weight, 1, 3);
 
     if (!title) throw new HttpError(400, 'SQUAD_TASK_TITLE_REQUIRED', '任务标题不能为空');
-    if (!roleId) throw new HttpError(400, 'SQUAD_TASK_ROLE_REQUIRED', '请选择角色');
-
-    const roles = toArray(await this.roleStore.read());
-    const role = roles.find((r) => r.id === roleId);
-    if (!role) throw new HttpError(404, 'SQUAD_ROLE_NOT_FOUND', `未找到角色: ${roleId}`);
+    const [roles, tasks] = await Promise.all([this.roleStore.read(), this.taskStore.read()]);
+    const assignment = resolveRoleAssignment({
+      roles: toArray(roles),
+      tasks: toArray(tasks),
+      requestedRoleId,
+      title,
+      description
+    });
+    const role = assignment.role;
 
     const task = {
       id: crypto.randomUUID(),
       title,
       description,
-      roleId,
+      roleId: role.id,
       roleName: role.name,
+      assignmentMode: assignment.assignmentMode,
+      assignmentReason: assignment.assignmentReason,
       weight,
       status: 'pending',
       completion: 0,
@@ -188,10 +325,15 @@ class SquadService {
     await this.logService.append({
       action: 'squad.task.create',
       type: 'squad',
-      target: roleId,
+      target: role.id,
       status: 'success',
       message: `${role.name} 接收任务：${title}`,
-      meta: { taskId: task.id }
+      meta: {
+        taskId: task.id,
+        requestedRoleId: requestedRoleId || AUTO_ROLE_ID,
+        assignmentMode: task.assignmentMode,
+        assignmentReason: task.assignmentReason
+      }
     });
 
     return task;
