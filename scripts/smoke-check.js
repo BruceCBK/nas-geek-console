@@ -182,6 +182,12 @@ async function main() {
     if (typeof data?.roles?.[0]?.blockedPenaltyMultiplier !== 'number') {
       throw new Error('expected role blocked penalty multiplier');
     }
+    if (typeof data?.roles?.[0]?.capabilityIndex !== 'number') {
+      throw new Error('expected role capabilityIndex');
+    }
+    if (!data?.causeLabels || typeof data.causeLabels !== 'object') {
+      throw new Error('expected squad causeLabels metadata');
+    }
   });
 
   await check('POST /api/squad/task auto-route(code) + review + reflection', async () => {
@@ -260,6 +266,9 @@ async function main() {
     }
     if (typeof reviewPayload?.role?.rewardPoints !== 'number') {
       throw new Error('expected role.rewardPoints in review payload');
+    }
+    if (typeof reviewPayload?.role?.capabilityIndex !== 'number') {
+      throw new Error('expected role.capabilityIndex in review payload');
     }
 
     const reflectionRoleId =

@@ -39,6 +39,14 @@ const REWARD_COMPLETION_THRESHOLD = 90;
 const REWARD_QUALITY_THRESHOLD = 90;
 const REWARD_STREAK_STEP = 3;
 const REWARD_MAX_BONUS = 5;
+const BLOCK_AT_RISK_MS = 4 * 60 * 1000;
+const ROLE_OVERLOAD_OPEN_TASKS = 6;
+const CAUSE_LABELS = {
+  heartbeat_timeout: '心跳超时',
+  overload: '负载过高',
+  collab_lag: '协同卡点',
+  execution_stagnation: '执行停滞'
+};
 
 const DEFAULT_ROLES = [
   {
@@ -82,6 +90,11 @@ function clamp(value, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, n));
+}
+
+function numberOr(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function avg(nums = []) {
@@ -264,6 +277,53 @@ function computeRewardDecision({ passed, completion, judgeQuality, blockedCount,
   };
 }
 
+function buildRoleOpenLoadMap(taskRows = []) {
+  const map = new Map();
+  for (const task of toArray(taskRows)) {
+    const roleId = pickText(task?.roleId);
+    if (!roleId) continue;
+    const status = pickText(task?.status).toLowerCase();
+    if (!TASK_OPEN_STATUSES.has(status)) continue;
+    map.set(roleId, (map.get(roleId) || 0) + 1);
+  }
+  return map;
+}
+
+function inferBlockedCause(task = {}, roleOpenLoad = 0) {
+  const blockedCount = Math.max(1, Number(task.blockedCount) || 1);
+  const relation = pickText(task.relationType, 'primary').toLowerCase();
+
+  if (blockedCount >= 3) {
+    return {
+      code: 'execution_stagnation',
+      cause: '同一任务多次阻塞，执行方法需要重构',
+      coaching: '建议拆分任务为更小里程碑，并在每个里程碑后复盘。'
+    };
+  }
+
+  if (roleOpenLoad >= ROLE_OVERLOAD_OPEN_TASKS) {
+    return {
+      code: 'overload',
+      cause: `角色当前在办任务 ${roleOpenLoad} 条，超出负载阈值`,
+      coaching: '建议先清理在办队列，并启用协同派工分流。'
+    };
+  }
+
+  if (relation === 'linked') {
+    return {
+      code: 'collab_lag',
+      cause: '协同子任务卡在对齐阶段，缺少同步检查点',
+      coaching: '建议在主任务每次关键变更后同步协同任务心跳。'
+    };
+  }
+
+  return {
+    code: 'heartbeat_timeout',
+    cause: '任务在执行窗口内未上报有效心跳',
+    coaching: '建议缩短心跳间隔并补充进展备注，避免信息黑盒。'
+  };
+}
+
 function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], loadMap = new Map() }) {
   const policyRoles = toArray(COLLAB_POLICY[primaryRoleId]);
   const matchedSecondary = scoredRows
@@ -386,9 +446,14 @@ function buildTaskRow({
     lastHeartbeatAt: ts,
     stalledAt: '',
     stalledReason: '',
+    runtimeRisk: '',
+    riskReason: '',
     blockedCount: 0,
     lastBlockedAt: '',
     blockedPenaltyApplied: false,
+    blockedReasonCode: '',
+    blockedRootCause: '',
+    recoveryHint: '',
     rewardBonus: 0,
     rewardReason: '',
     completion: 0,
@@ -422,6 +487,9 @@ function roleTemplate(base = {}) {
     bestRewardStreak: 0,
     rewardPoints: 0,
     lastRewardAt: '',
+    capabilityIndex: 100,
+    growthFocus: '保持高频心跳与高质量交付',
+    blockCauseStats: {},
     avgCompletion: 0,
     avgQuality: 0,
     warningCount: 0,
@@ -464,6 +532,11 @@ class SquadService {
       return toArray(rows).map((role) => {
         const score = clamp(role?.score, 0, MAX_SCORE);
         const status = score < WARNING_SCORE ? 'warning' : 'active';
+        let capabilitySeed = numberOr(role?.capabilityIndex, score || 100);
+        if (capabilitySeed === 0 && score >= 90 && numberOr(role?.failureEvents, 0) <= 1) {
+          capabilitySeed = score || 100;
+        }
+
         return {
           ...role,
           score,
@@ -475,6 +548,9 @@ class SquadService {
           bestRewardStreak: Math.max(0, Number(role?.bestRewardStreak) || 0),
           rewardPoints: Math.max(0, Number(role?.rewardPoints) || 0),
           lastRewardAt: pickText(role?.lastRewardAt),
+          capabilityIndex: clamp(capabilitySeed, 0, 100),
+          growthFocus: pickText(role?.growthFocus, '保持高频心跳与高质量交付'),
+          blockCauseStats: role?.blockCauseStats && typeof role.blockCauseStats === 'object' ? role.blockCauseStats : {},
           status
         };
       });
@@ -534,6 +610,8 @@ class SquadService {
             next.status = 'running';
             next.stalledAt = '';
             next.stalledReason = '';
+            next.runtimeRisk = '';
+            next.riskReason = '';
             next.blockedPenaltyApplied = false;
             recovered.push({ id: next.id, roleId: next.roleId, roleName: next.roleName, title: next.title });
             normalized = 'running';
@@ -549,6 +627,8 @@ class SquadService {
           next.progressNote = `执行器自动心跳：进度 ${next.progressPercent}%`;
           next.stalledAt = '';
           next.stalledReason = '';
+          next.runtimeRisk = '';
+          next.riskReason = '';
 
           heartbeatTouched.push(next.id);
           if (next.progressPercent >= EXECUTOR_AUTO_COMPLETE_AT) {
@@ -619,11 +699,23 @@ class SquadService {
         next.lastHeartbeatAt = pickText(next.lastHeartbeatAt, next.startedAt, next.createdAt, nowText);
 
         const hbMs = Date.parse(next.lastHeartbeatAt);
-        const isStale = Number.isFinite(hbMs) && nowMs - hbMs > TASK_RUNNING_STALE_MS;
+        const silenceMs = Number.isFinite(hbMs) ? nowMs - hbMs : 0;
+        const isStale = Number.isFinite(hbMs) && silenceMs > TASK_RUNNING_STALE_MS;
+
+        if (!isStale && silenceMs > BLOCK_AT_RISK_MS && pickText(next.status).toLowerCase() !== 'blocked') {
+          next.runtimeRisk = 'at-risk';
+          next.riskReason = '心跳静默超过4分钟，接近阻塞阈值';
+        } else if (pickText(next.runtimeRisk).toLowerCase() === 'at-risk') {
+          next.runtimeRisk = '';
+          next.riskReason = '';
+        }
+
         if (isStale) {
           const wasBlocked = normalized === 'blocked';
 
           next.status = 'blocked';
+          next.runtimeRisk = 'blocked';
+          next.riskReason = '任务已进入阻塞态';
           next.stalledAt = pickText(next.stalledAt, nowText);
           next.stalledReason = pickText(
             next.stalledReason,
@@ -643,11 +735,18 @@ class SquadService {
               roleId: pickText(next.roleId),
               roleName: pickText(next.roleName),
               title: pickText(next.title),
+              relationType: pickText(next.relationType),
               weight: clamp(next.weight, 1, 3),
               blockedCount: Math.max(1, Number(next.blockedCount) || 1),
               lastBlockedAt: pickText(next.lastBlockedAt, next.stalledAt)
             });
           }
+        }
+
+        if (pickText(next.status).toLowerCase() === 'blocked' && !pickText(next.blockedReasonCode)) {
+          next.blockedReasonCode = 'heartbeat_timeout';
+          next.blockedRootCause = pickText(next.blockedRootCause, '任务在执行窗口内未上报有效心跳');
+          next.recoveryHint = pickText(next.recoveryHint, '建议缩短心跳间隔并补充进展备注，避免信息黑盒。');
         }
 
         const progress = clamp(next.progressPercent, 0, 99);
@@ -658,27 +757,63 @@ class SquadService {
 
     if (!newlyBlocked.length) return;
 
-    const rolePenaltyMap = new Map();
-    for (const task of newlyBlocked) {
-      if (!task.roleId) continue;
-
+    const roleOpenLoadMap = buildRoleOpenLoadMap(updatedTasks);
+    const blockedDiagnostics = newlyBlocked.map((task) => {
+      const roleOpenLoad = roleOpenLoadMap.get(task.roleId) || 0;
+      const diagnosis = inferBlockedCause(task, roleOpenLoad);
       const recentBlockedCount = recentBlockedCountForRole(updatedTasks, task.roleId, nowMs);
       const multiplier = blockedPenaltyMultiplier(recentBlockedCount);
       const penalty = Math.round(blockedPenaltyByWeight(task.weight) * multiplier);
+      return {
+        ...task,
+        roleOpenLoad,
+        recentBlockedCount,
+        multiplier,
+        penalty,
+        reasonCode: diagnosis.code,
+        rootCause: diagnosis.cause,
+        coaching: diagnosis.coaching
+      };
+    });
+
+    await this.taskStore.update((rows) => {
+      const list = toArray(rows);
+      const diagMap = new Map(blockedDiagnostics.map((row) => [row.id, row]));
+      return list.map((task) => {
+        const diag = diagMap.get(task?.id);
+        if (!diag) return task;
+        return {
+          ...task,
+          blockedReasonCode: diag.reasonCode,
+          blockedRootCause: diag.rootCause,
+          recoveryHint: diag.coaching
+        };
+      });
+    });
+
+    const rolePenaltyMap = new Map();
+    for (const task of blockedDiagnostics) {
+      if (!task.roleId) continue;
 
       const current = rolePenaltyMap.get(task.roleId) || {
         delta: 0,
         failures: 0,
         roleName: task.roleName,
-        recentBlockedCount,
-        multiplier
+        recentBlockedCount: task.recentBlockedCount,
+        multiplier: task.multiplier,
+        reasons: {},
+        coachingHints: []
       };
 
-      current.delta += penalty;
+      current.delta += task.penalty;
       current.failures += 1;
-      current.recentBlockedCount = Math.max(current.recentBlockedCount || 0, recentBlockedCount);
-      current.multiplier = Math.max(current.multiplier || 1, multiplier);
+      current.recentBlockedCount = Math.max(current.recentBlockedCount || 0, task.recentBlockedCount);
+      current.multiplier = Math.max(current.multiplier || 1, task.multiplier);
       current.delta = Math.max(current.delta, -MAX_BLOCKED_PENALTY_PER_SWEEP);
+      current.reasons[task.reasonCode] = (current.reasons[task.reasonCode] || 0) + 1;
+      if (task.coaching && !current.coachingHints.includes(task.coaching)) {
+        current.coachingHints.push(task.coaching);
+      }
       rolePenaltyMap.set(task.roleId, current);
     }
 
@@ -691,6 +826,17 @@ class SquadService {
         const nextFailureEvents = (Number(role?.failureEvents) || Number(role?.failedTasks) || 0) + patch.failures;
         const nextStatus = nextScore < WARNING_SCORE || patch.failures > 0 ? 'warning' : 'active';
 
+        const previousCauseStats =
+          role?.blockCauseStats && typeof role.blockCauseStats === 'object' ? role.blockCauseStats : {};
+        const mergedCauseStats = { ...previousCauseStats };
+        for (const [code, count] of Object.entries(patch.reasons || {})) {
+          mergedCauseStats[code] = (Number(mergedCauseStats[code]) || 0) + Number(count || 0);
+        }
+
+        const coachingText = patch.coachingHints?.length
+          ? `改进行动：${patch.coachingHints.join('；')}`
+          : '改进行动：缩短心跳周期，保持可观测进展。';
+
         return {
           ...role,
           score: nextScore,
@@ -702,6 +848,9 @@ class SquadService {
           rewardStreak: 0,
           bestRewardStreak: Math.max(0, Number(role?.bestRewardStreak) || 0),
           rewardPoints: Math.max(0, Number(role?.rewardPoints) || 0),
+          capabilityIndex: clamp(numberOr(role?.capabilityIndex, 100) - Math.max(1, patch.failures), 0, 100),
+          growthFocus: coachingText,
+          blockCauseStats: mergedCauseStats,
           warningCount: (Number(role?.warningCount) || 0) + (nextStatus === 'warning' ? 1 : 0),
           reflection: pickText(role?.reflection, '出现阻塞任务，需复盘根因并提交改进措施。'),
           updatedAt: nowIso()
@@ -709,11 +858,7 @@ class SquadService {
       });
     });
 
-    for (const task of newlyBlocked) {
-      const recentBlockedCount = recentBlockedCountForRole(updatedTasks, task.roleId, nowMs);
-      const multiplier = blockedPenaltyMultiplier(recentBlockedCount);
-      const penalty = Math.round(blockedPenaltyByWeight(task.weight) * multiplier);
-
+    for (const task of blockedDiagnostics) {
       await this.logService.append({
         action: 'squad.task.blocked',
         type: 'squad',
@@ -722,12 +867,16 @@ class SquadService {
         message: `${task.roleName || task.roleId} 任务阻塞：${task.title || task.id}`,
         meta: {
           taskId: task.id,
-          penalty,
-          multiplier,
-          recentBlockedCount,
+          penalty: task.penalty,
+          multiplier: task.multiplier,
+          recentBlockedCount: task.recentBlockedCount,
           blockedCount: task.blockedCount,
           blockedAt: task.lastBlockedAt,
-          reason: 'no-heartbeat-timeout'
+          reason: task.reasonCode,
+          reasonLabel: CAUSE_LABELS[task.reasonCode] || task.reasonCode,
+          rootCause: task.rootCause,
+          coaching: task.coaching,
+          roleOpenLoad: task.roleOpenLoad
         }
       });
     }
@@ -749,6 +898,7 @@ class SquadService {
       const doneTasks = roleTasks.filter((task) => task.status === 'completed');
       const failedTasks = roleTasks.filter((task) => task.status === 'failed');
       const blockedTasks = roleTasks.filter((task) => task.status === 'blocked');
+      const atRiskTasks = roleTasks.filter((task) => pickText(task.runtimeRisk).toLowerCase() === 'at-risk');
       const pendingTasks = roleTasks.filter((task) => TASK_OPEN_STATUSES.has(pickText(task.status).toLowerCase()));
       const unresolvedFailures = failedTasks.length + blockedTasks.length;
       const recentBlockedCount = recentBlockedCountForRole(taskRows, role.id, nowMs);
@@ -759,6 +909,9 @@ class SquadService {
         unresolvedFailures
       );
       const status = unresolvedFailures > 0 || Number(role?.score || 0) < WARNING_SCORE ? 'warning' : 'active';
+      const causeStats = role?.blockCauseStats && typeof role.blockCauseStats === 'object' ? role.blockCauseStats : {};
+      const topCause = Object.entries(causeStats)
+        .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0]?.[0] || '';
 
       return {
         ...role,
@@ -768,11 +921,16 @@ class SquadService {
         failedTasks: unresolvedFailures,
         failureEvents,
         blockedTasks: blockedTasks.length,
+        atRiskTasks: atRiskTasks.length,
         blockedPressure24h: recentBlockedCount,
         blockedPenaltyMultiplier: pressureMultiplier,
+        topBlockCause: topCause,
         pendingTasks: pendingTasks.length,
         avgCompletion: Math.round(avg(roleTasks.map((task) => Number(task.completion) || 0))),
-        avgQuality: Math.round(avg(roleTasks.map((task) => Number(task.quality) || 0)))
+        avgQuality: Math.round(avg(roleTasks.map((task) => Number(task.quality) || 0))),
+        capabilityIndex: clamp(numberOr(role?.capabilityIndex, numberOr(role?.score, 100)), 0, 100),
+        growthFocus: pickText(role?.growthFocus, '保持高频心跳与高质量交付'),
+        blockCauseStats: causeStats
       };
     });
 
@@ -789,6 +947,7 @@ class SquadService {
       completedTasks: taskRows.filter((t) => t.status === 'completed').length,
       failedTasks: taskRows.filter((t) => t.status === 'failed' || t.status === 'blocked').length,
       blockedTasks: taskRows.filter((t) => t.status === 'blocked').length,
+      atRiskTasks: taskRows.filter((t) => pickText(t.runtimeRisk).toLowerCase() === 'at-risk').length,
       pendingTasks: taskRows.filter((t) => TASK_OPEN_STATUSES.has(pickText(t.status).toLowerCase())).length
     };
 
@@ -803,6 +962,7 @@ class SquadService {
         lastError: this.executorLastError,
         stats: { ...this.executorStats }
       },
+      causeLabels: { ...CAUSE_LABELS },
       captainDirective: CAPTAIN_DISPATCH_DOCTRINE,
       warningRoles: warningRoles.map((row) => ({
         id: row.id,
@@ -943,6 +1103,8 @@ class SquadService {
         lastHeartbeatAt: nowIso(),
         stalledAt: '',
         stalledReason: '',
+        runtimeRisk: '',
+        riskReason: '',
         reviewNote,
         gradedAt: nowIso()
       };
@@ -1009,6 +1171,14 @@ class SquadService {
     const nextRewardStreak = passed ? rewardDecision.nextStreak : 0;
     const nextBestRewardStreak = Math.max(Number(role.bestRewardStreak) || 0, nextRewardStreak);
     const nextRewardPoints = Math.max(0, Number(role.rewardPoints) || 0) + rewardBonus;
+    const capabilityGain = rewardBonus > 0 ? Math.min(3, rewardBonus) : passed ? 1 : 0;
+    const nextCapabilityIndex = clamp(numberOr(role?.capabilityIndex, 100) + capabilityGain, 0, 100);
+    const nextGrowthFocus =
+      rewardBonus > 0
+        ? `保持连胜节奏：${pickText(rewardDecision.reason)}`
+        : passed
+          ? '继续保持稳定心跳与交付质量，冲击高质量奖励阈值。'
+          : pickText(role.growthFocus, '失败后请先拆分任务并补齐过程心跳。');
 
     const reflection =
       status === 'warning' && !pickText(role.reflection)
@@ -1031,6 +1201,8 @@ class SquadService {
       bestRewardStreak: nextBestRewardStreak,
       rewardPoints: nextRewardPoints,
       lastRewardAt: rewardBonus > 0 ? nowIso() : pickText(role.lastRewardAt),
+      capabilityIndex: nextCapabilityIndex,
+      growthFocus: nextGrowthFocus,
       avgCompletion: Math.round(avg(roleTasks.map((t) => Number(t.completion) || 0))),
       avgQuality: Math.round(avg(roleTasks.map((t) => Number(t.quality) || 0))),
       warningCount: (Number(role.warningCount) || 0) + (status === 'warning' ? 1 : 0),
@@ -1060,7 +1232,9 @@ class SquadService {
         rewardBonus,
         rewardReason: pickText(rewardDecision.reason),
         rewardStreak: patchedRole.rewardStreak,
-        rewardPoints: patchedRole.rewardPoints
+        rewardPoints: patchedRole.rewardPoints,
+        capabilityIndex: patchedRole.capabilityIndex,
+        growthFocus: patchedRole.growthFocus
       }
     });
 
@@ -1103,6 +1277,8 @@ class SquadService {
         progressPercent: Math.max(clamp(current.progressPercent, 0, 99), progressPercent, 5),
         stalledAt: '',
         stalledReason: '',
+        runtimeRisk: '',
+        riskReason: '',
         blockedPenaltyApplied: false,
         progressNote: note || pickText(current.progressNote)
       };

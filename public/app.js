@@ -1481,6 +1481,7 @@ function renderSquadRoles() {
 
   const roles = toArray(state.squad.roles);
   const executor = state.squad.executor || {};
+  const causeLabels = state.squad.causeLabels || {};
   if (!roles.length) {
     dom.squadRoleBoard.appendChild(buildEmpty('暂无角色数据'));
     return;
@@ -1513,12 +1514,13 @@ function renderSquadRoles() {
     const rewardStreak = Number(role.rewardStreak) || 0;
     const bestRewardStreak = Number(role.bestRewardStreak) || 0;
     const rewardPoints = Number(role.rewardPoints) || 0;
+    const capabilityIndex = Number(role.capabilityIndex) || 0;
 
     const meta = document.createElement('small');
-    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)} · 历史失败 ${formatNumber(role.failureEvents)} · 连胜 ${formatNumber(rewardStreak)}(最高${formatNumber(bestRewardStreak)}) · 奖励积分 ${formatNumber(rewardPoints)} · 24h阻塞压力 ${formatNumber(pressureCount)} · 惩罚倍率 x${pressureMul.toFixed(2)}`;
+    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)} · 能力指数 ${formatNumber(capabilityIndex)} · 历史失败 ${formatNumber(role.failureEvents)} · 连胜 ${formatNumber(rewardStreak)}(最高${formatNumber(bestRewardStreak)}) · 奖励积分 ${formatNumber(rewardPoints)} · 24h阻塞压力 ${formatNumber(pressureCount)} · 惩罚倍率 x${pressureMul.toFixed(2)}`;
 
     const stat = document.createElement('small');
-    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
+    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜风险中 ${formatNumber(role.atRiskTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
 
     line.append(title, badge);
     item.append(line, meta, stat);
@@ -1526,11 +1528,19 @@ function renderSquadRoles() {
     if (status === 'warning') {
       const warn = document.createElement('small');
       warn.className = 'warning-text';
+      const topCause = pickText(role.topBlockCause);
+      const topCauseLabel = pickText(causeLabels[topCause], topCause, '-');
       warn.textContent =
         blockedCount > 0
-          ? `⚠ 当前有 ${formatNumber(blockedCount)} 条阻塞任务：${pickText(role.reflection, '请立即排障并补充进度心跳')}`
+          ? `⚠ 当前有 ${formatNumber(blockedCount)} 条阻塞任务（主因：${topCauseLabel}）：${pickText(role.reflection, '请立即排障并补充进度心跳')}`
           : `⚠ 低于60分：${pickText(role.reflection, '需提交自省与改进计划')}`;
       item.append(warn);
+    }
+
+    if (pickText(role.growthFocus)) {
+      const growth = document.createElement('small');
+      growth.textContent = `成长建议：${pickText(role.growthFocus)}`;
+      item.append(growth);
     }
 
     dom.squadRoleBoard.appendChild(item);
@@ -1581,6 +1591,7 @@ function renderSquadTasks() {
   dom.squadTaskBoard.innerHTML = '';
 
   const tasks = toArray(state.squad.tasks);
+  const causeLabels = state.squad.causeLabels || {};
   if (!tasks.length) {
     dom.squadTaskBoard.appendChild(buildEmpty('暂无任务，先创建一条吧'));
     return;
@@ -1596,14 +1607,18 @@ function renderSquadTasks() {
     const title = document.createElement('strong');
     title.textContent = `${pickText(task.title)} · ${pickText(task.roleName)}`;
 
-    const badge = buildBadge(pickText(task.status, 'pending'));
+    const taskStatus = pickText(task.status, 'pending').toLowerCase();
+    const badge = buildBadge(taskStatus);
+    if (pickText(task.runtimeRisk).toLowerCase() === 'at-risk' && taskStatus === 'running') {
+      badge.className = 'badge warning';
+      badge.textContent = 'at-risk';
+    }
 
     const detail = document.createElement('small');
     const relation = pickText(task.relationType, 'primary') === 'linked' ? '协同子任务' : '主任务';
     detail.textContent = `ID ${pickText(task.id)} · ${relation} · 权重 ${formatNumber(task.weight)} · Δ ${Number(task.scoreDelta) > 0 ? '+' : ''}${formatNumber(task.scoreDelta)}`;
 
     const judge = document.createElement('small');
-    const taskStatus = pickText(task.status, 'pending').toLowerCase();
     const reviewText =
       taskStatus === 'completed'
         ? '已通过'
@@ -1638,6 +1653,18 @@ function renderSquadTasks() {
       item.append(reward);
     }
 
+    if (pickText(task.blockedRootCause) || pickText(task.recoveryHint)) {
+      const diagnosis = document.createElement('small');
+      const reasonCode = pickText(task.blockedReasonCode);
+      const reasonLabel = pickText(causeLabels[reasonCode], reasonCode);
+      diagnosis.textContent = `阻塞诊断：${pickText(task.blockedRootCause, '-')}`;
+      if (reasonLabel) diagnosis.textContent = `阻塞诊断(${reasonLabel})：${pickText(task.blockedRootCause, '-')}`;
+      if (pickText(task.recoveryHint)) {
+        diagnosis.textContent += `｜改进建议：${pickText(task.recoveryHint)}`;
+      }
+      item.append(diagnosis);
+    }
+
     const runtime = document.createElement('small');
     const heartbeatLagMs = Date.now() - parseDateMs(pickText(task.lastHeartbeatAt, task.createdAt));
     const heartbeatLagMin = heartbeatLagMs > 0 ? Math.floor(heartbeatLagMs / 60000) : 0;
@@ -1646,6 +1673,7 @@ function renderSquadTasks() {
       `最近心跳 ${formatTime(task.lastHeartbeatAt || task.createdAt)}`,
       `静默 ${heartbeatLagMin} 分钟`
     ];
+    if (pickText(task.runtimeRisk)) runtimeParts.push(`风险态：${pickText(task.runtimeRisk)} ${pickText(task.riskReason)}`);
     if (pickText(task.stalledReason)) runtimeParts.push(`阻塞原因：${pickText(task.stalledReason)}`);
     if (pickText(task.progressNote)) runtimeParts.push(`进展：${pickText(task.progressNote)}`);
     runtime.textContent = runtimeParts.join('｜');
