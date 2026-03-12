@@ -23,6 +23,8 @@ const COLLAB_POLICY = {
 const TASK_OPEN_STATUSES = new Set(['pending', 'running', 'blocked']);
 const TASK_TERMINAL_STATUSES = new Set(['completed', 'failed']);
 const TASK_RUNNING_STALE_MS = 8 * 60 * 1000;
+const BLOCKED_PENALTY_PER_WEIGHT = 3;
+const MAX_BLOCKED_PENALTY_PER_SWEEP = 18;
 
 const DEFAULT_ROLES = [
   {
@@ -154,6 +156,11 @@ function pickLeastLoadedRole(candidates = [], loadMap = new Map()) {
 
 function describeLoad(load = {}) {
   return `pending=${Number(load.pending) || 0}, total=${Number(load.total) || 0}`;
+}
+
+function blockedPenaltyByWeight(weight) {
+  const w = clamp(weight, 1, 3);
+  return -BLOCKED_PENALTY_PER_WEIGHT * w;
 }
 
 function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], loadMap = new Map() }) {
@@ -302,6 +309,7 @@ function roleTemplate(base = {}) {
     totalTasks: 0,
     doneTasks: 0,
     failedTasks: 0,
+    failureEvents: 0,
     avgCompletion: 0,
     avgQuality: 0,
     warningCount: 0,
@@ -335,6 +343,7 @@ class SquadService {
           ...role,
           score,
           dispatchDoctrine: pickText(role?.dispatchDoctrine, CAPTAIN_DISPATCH_DOCTRINE),
+          failureEvents: Number(role?.failureEvents) || Number(role?.failedTasks) || 0,
           status
         };
       });
@@ -352,6 +361,7 @@ class SquadService {
   async _normalizeTaskRuntime() {
     const nowMs = Date.now();
     const nowText = nowIso();
+    const newlyBlocked = [];
 
     await this.taskStore.update((rows) => {
       return toArray(rows).map((task) => {
@@ -376,13 +386,25 @@ class SquadService {
         next.lastHeartbeatAt = pickText(next.lastHeartbeatAt, next.startedAt, next.createdAt, nowText);
 
         const hbMs = Date.parse(next.lastHeartbeatAt);
-        if (Number.isFinite(hbMs) && nowMs - hbMs > TASK_RUNNING_STALE_MS) {
+        const isStale = Number.isFinite(hbMs) && nowMs - hbMs > TASK_RUNNING_STALE_MS;
+        if (isStale) {
           next.status = 'blocked';
           next.stalledAt = pickText(next.stalledAt, nowText);
           next.stalledReason = pickText(
             next.stalledReason,
             '超过8分钟无进展心跳，状态已标记为 blocked，请跟进或重派。'
           );
+
+          if (!next.blockedPenaltyApplied) {
+            next.blockedPenaltyApplied = true;
+            newlyBlocked.push({
+              id: pickText(next.id),
+              roleId: pickText(next.roleId),
+              roleName: pickText(next.roleName),
+              title: pickText(next.title),
+              weight: clamp(next.weight, 1, 3)
+            });
+          }
         }
 
         const progress = clamp(next.progressPercent, 0, 99);
@@ -390,6 +412,59 @@ class SquadService {
         return next;
       });
     });
+
+    if (!newlyBlocked.length) return;
+
+    const rolePenaltyMap = new Map();
+    for (const task of newlyBlocked) {
+      if (!task.roleId) continue;
+      const current = rolePenaltyMap.get(task.roleId) || {
+        delta: 0,
+        failures: 0,
+        roleName: task.roleName
+      };
+      current.delta += blockedPenaltyByWeight(task.weight);
+      current.failures += 1;
+      current.delta = Math.max(current.delta, -MAX_BLOCKED_PENALTY_PER_SWEEP);
+      rolePenaltyMap.set(task.roleId, current);
+    }
+
+    await this.roleStore.update((rows) => {
+      return toArray(rows).map((role) => {
+        const patch = rolePenaltyMap.get(role?.id);
+        if (!patch) return role;
+
+        const nextScore = clamp((Number(role?.score) || BASE_SCORE) + patch.delta, 0, MAX_SCORE);
+        const nextFailureEvents = (Number(role?.failureEvents) || Number(role?.failedTasks) || 0) + patch.failures;
+        const nextStatus = nextScore < WARNING_SCORE || patch.failures > 0 ? 'warning' : 'active';
+
+        return {
+          ...role,
+          score: nextScore,
+          status: nextStatus,
+          failedTasks: nextFailureEvents,
+          failureEvents: nextFailureEvents,
+          warningCount: (Number(role?.warningCount) || 0) + (nextStatus === 'warning' ? 1 : 0),
+          reflection: pickText(role?.reflection, '出现阻塞任务，需复盘根因并提交改进措施。'),
+          updatedAt: nowIso()
+        };
+      });
+    });
+
+    for (const task of newlyBlocked) {
+      await this.logService.append({
+        action: 'squad.task.blocked',
+        type: 'squad',
+        target: task.roleId,
+        status: 'failed',
+        message: `${task.roleName || task.roleId} 任务阻塞：${task.title || task.id}`,
+        meta: {
+          taskId: task.id,
+          penalty: blockedPenaltyByWeight(task.weight),
+          reason: 'no-heartbeat-timeout'
+        }
+      });
+    }
   }
 
   async _reconcileTaskLiveness() {
@@ -406,12 +481,24 @@ class SquadService {
       const roleTasks = taskRows.filter((task) => task && task.roleId === role.id);
       const doneTasks = roleTasks.filter((task) => task.status === 'completed');
       const failedTasks = roleTasks.filter((task) => task.status === 'failed');
+      const blockedTasks = roleTasks.filter((task) => task.status === 'blocked');
       const pendingTasks = roleTasks.filter((task) => TASK_OPEN_STATUSES.has(pickText(task.status).toLowerCase()));
+      const unresolvedFailures = failedTasks.length + blockedTasks.length;
+      const failureEvents = Math.max(
+        Number(role?.failureEvents) || 0,
+        Number(role?.failedTasks) || 0,
+        unresolvedFailures
+      );
+      const status = unresolvedFailures > 0 || Number(role?.score || 0) < WARNING_SCORE ? 'warning' : 'active';
+
       return {
         ...role,
+        status,
         totalTasks: roleTasks.length,
         doneTasks: doneTasks.length,
-        failedTasks: failedTasks.length,
+        failedTasks: unresolvedFailures,
+        failureEvents,
+        blockedTasks: blockedTasks.length,
         pendingTasks: pendingTasks.length,
         avgCompletion: Math.round(avg(roleTasks.map((task) => Number(task.completion) || 0))),
         avgQuality: Math.round(avg(roleTasks.map((task) => Number(task.quality) || 0)))
@@ -422,7 +509,7 @@ class SquadService {
       .slice()
       .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
 
-    const warningRoles = sortedRoles.filter((r) => Number(r.score || 0) < WARNING_SCORE);
+    const warningRoles = sortedRoles.filter((r) => pickText(r.status, '').toLowerCase() === 'warning');
     const summary = {
       totalRoles: sortedRoles.length,
       avgScore: Math.round(avg(sortedRoles.map((r) => Number(r.score) || 0))),
@@ -611,6 +698,7 @@ class SquadService {
     const roleTasks = taskRows.filter((t) => t && t.roleId === role.id);
     const doneTasks = roleTasks.filter((t) => t.status === 'completed');
     const failedTasks = roleTasks.filter((t) => t.status === 'failed');
+    const blockedTasks = roleTasks.filter((t) => t.status === 'blocked');
     const score = clamp((Number(role.score) || BASE_SCORE) + delta, 0, MAX_SCORE);
     const status = score < WARNING_SCORE ? 'warning' : 'active';
 
@@ -625,7 +713,12 @@ class SquadService {
       status,
       totalTasks: roleTasks.length,
       doneTasks: doneTasks.length,
-      failedTasks: failedTasks.length,
+      failedTasks: failedTasks.length + blockedTasks.length,
+      failureEvents: Math.max(
+        Number(role.failureEvents) || Number(role.failedTasks) || 0,
+        failedTasks.length + blockedTasks.length
+      ),
+      blockedTasks: blockedTasks.length,
       avgCompletion: Math.round(avg(roleTasks.map((t) => Number(t.completion) || 0))),
       avgQuality: Math.round(avg(roleTasks.map((t) => Number(t.quality) || 0))),
       warningCount: (Number(role.warningCount) || 0) + (status === 'warning' ? 1 : 0),

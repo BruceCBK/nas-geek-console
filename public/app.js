@@ -1495,14 +1495,15 @@ function renderSquadRoles() {
     const title = document.createElement('strong');
     title.textContent = `${pickText(role.name)} (${pickText(role.codename)})`;
 
-    const status = Number(role.score) < 60 ? 'warning' : 'active';
+    const blockedCount = Number(role.blockedTasks) || 0;
+    const status = pickText(role.status, blockedCount > 0 || Number(role.score) < 60 ? 'warning' : 'active').toLowerCase();
     const badge = buildBadge(status);
 
     const meta = document.createElement('small');
-    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)}`;
+    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)} · 历史失败 ${formatNumber(role.failureEvents)}`;
 
     const stat = document.createElement('small');
-    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
+    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
 
     line.append(title, badge);
     item.append(line, meta, stat);
@@ -1510,7 +1511,10 @@ function renderSquadRoles() {
     if (status === 'warning') {
       const warn = document.createElement('small');
       warn.className = 'warning-text';
-      warn.textContent = `⚠ 低于60分：${pickText(role.reflection, '需提交自省与改进计划')}`;
+      warn.textContent =
+        blockedCount > 0
+          ? `⚠ 当前有 ${formatNumber(blockedCount)} 条阻塞任务：${pickText(role.reflection, '请立即排障并补充进度心跳')}`
+          : `⚠ 低于60分：${pickText(role.reflection, '需提交自省与改进计划')}`;
       item.append(warn);
     }
 
@@ -1625,6 +1629,27 @@ function renderSquadTasks() {
     runtime.textContent = runtimeParts.join('｜');
     item.append(runtime);
 
+    if (['running', 'blocked', 'pending'].includes(taskStatus)) {
+      const actions = document.createElement('div');
+      actions.className = 'row';
+
+      const heartbeatBtn = document.createElement('button');
+      heartbeatBtn.textContent = taskStatus === 'blocked' ? '恢复并上报进度' : '上报进度心跳';
+      heartbeatBtn.addEventListener('click', () => {
+        reportSquadTaskHeartbeat(task).catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+      });
+
+      const useForReviewBtn = document.createElement('button');
+      useForReviewBtn.textContent = '填入评分ID';
+      useForReviewBtn.addEventListener('click', () => {
+        if (dom.squadReviewTaskIdInput) dom.squadReviewTaskIdInput.value = pickText(task.id);
+        setMessage(dom.squadMsg, `已填入任务ID：${pickText(task.id)}`, 'info');
+      });
+
+      actions.append(heartbeatBtn, useForReviewBtn);
+      item.append(actions);
+    }
+
     dom.squadTaskBoard.appendChild(item);
   });
 
@@ -1721,6 +1746,36 @@ async function createSquadTask() {
       : `已派发任务：${title} -> ${routedRole}${linkedHint}`;
     setMessage(dom.squadMsg, resultText, 'success');
   });
+}
+
+async function reportSquadTaskHeartbeat(task) {
+  const taskId = pickText(task?.id);
+  if (!taskId) {
+    setMessage(dom.squadMsg, '任务ID缺失，无法上报心跳', 'error');
+    return;
+  }
+
+  const currentProgress = Math.max(0, Math.min(99, Number(task?.progressPercent) || 0));
+  const progressInput = window.prompt('请输入当前进度（0-99）', String(Math.max(currentProgress, 10)));
+  if (progressInput === null) return;
+
+  const progressPercent = Number(progressInput);
+  if (!Number.isFinite(progressPercent) || progressPercent < 0 || progressPercent > 99) {
+    setMessage(dom.squadMsg, '进度必须是 0-99 的数字', 'error');
+    return;
+  }
+
+  const noteInput = window.prompt('请输入进展备注（可选）', pickText(task?.progressNote));
+  const note = noteInput === null ? '' : pickText(noteInput);
+
+  setMessage(dom.squadMsg, '心跳上报中...', 'info', 0);
+  await apiJson(`/api/squad/task/${encodeURIComponent(taskId)}/heartbeat`, {
+    method: 'POST',
+    body: { progressPercent, note }
+  });
+
+  await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+  setMessage(dom.squadMsg, `已上报心跳：${pickText(task.title)} -> ${formatNumber(progressPercent)}%`, 'success');
 }
 
 async function submitSquadReview() {
