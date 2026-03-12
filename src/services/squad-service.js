@@ -25,6 +25,16 @@ const TASK_TERMINAL_STATUSES = new Set(['completed', 'failed']);
 const TASK_RUNNING_STALE_MS = 8 * 60 * 1000;
 const BLOCKED_PENALTY_PER_WEIGHT = 3;
 const MAX_BLOCKED_PENALTY_PER_SWEEP = 18;
+const EXECUTOR_TICK_MS = Math.max(20 * 1000, Number.parseInt(process.env.SQUAD_EXECUTOR_TICK_MS || '45000', 10) || 45000);
+const EXECUTOR_BLOCKED_RECOVER_MS = 2 * 60 * 1000;
+const EXECUTOR_AUTO_COMPLETE_AT = 96;
+const EXECUTOR_ROLE_PROGRESS_STEP = {
+  'neon-scout': 16,
+  'code-claw': 14,
+  'radar-qa': 12,
+  'ops-tide': 13,
+  'doc-pulse': 11
+};
 
 const DEFAULT_ROLES = [
   {
@@ -161,6 +171,31 @@ function describeLoad(load = {}) {
 function blockedPenaltyByWeight(weight) {
   const w = clamp(weight, 1, 3);
   return -BLOCKED_PENALTY_PER_WEIGHT * w;
+}
+
+function executorStepForTask(task = {}) {
+  const roleId = pickText(task.roleId);
+  const base = EXECUTOR_ROLE_PROGRESS_STEP[roleId] || 10;
+  const relation = pickText(task.relationType, 'primary').toLowerCase();
+  const relationBoost = relation === 'linked' ? 2 : 0;
+  const loadPenalty = Math.max(0, (Number(task.weight) || 1) - 1);
+  return Math.max(4, base + relationBoost - loadPenalty);
+}
+
+function buildExecutorReviewPayload(task = {}) {
+  const progress = clamp(task.progressPercent, 0, 100);
+  const completion = clamp(progress + 3, 85, 100);
+  const qualityBase = 86 + Math.min(10, Math.floor((progress - 60) / 6));
+  const quality = clamp(qualityBase, 80, 98);
+
+  return {
+    completion,
+    quality,
+    ownerScore: clamp(quality - 1, 80, 98),
+    captainScore: clamp(quality + 1, 80, 99),
+    passed: true,
+    reviewNote: '队长自动验收：执行器持续心跳达标，任务闭环完成。'
+  };
 }
 
 function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], loadMap = new Map() }) {
@@ -325,6 +360,18 @@ class SquadService {
     this.taskStore = taskStore;
     this.logService = logService;
     this.maxTasks = 1000;
+    this.executorTickMs = EXECUTOR_TICK_MS;
+    this.executorEnabled = true;
+    this.executorTimer = null;
+    this.executorTickRunning = false;
+    this.executorLastTickAt = '';
+    this.executorLastError = '';
+    this.executorStats = {
+      ticks: 0,
+      heartbeatUpdates: 0,
+      recoveredCount: 0,
+      autoCompleted: 0
+    };
   }
 
   async init() {
@@ -332,6 +379,7 @@ class SquadService {
     await this._ensureSeed();
     await this._normalizeRoleScores();
     await this._normalizeTaskRuntime();
+    this._startExecutorLoop();
   }
 
   async _normalizeRoleScores() {
@@ -356,6 +404,107 @@ class SquadService {
 
     const seeded = DEFAULT_ROLES.map((row) => roleTemplate(row));
     await this.roleStore.write(seeded);
+  }
+
+  _startExecutorLoop() {
+    if (!this.executorEnabled || this.executorTimer) return;
+
+    this.executorTimer = setInterval(() => {
+      this._executorTick().catch((error) => {
+        this.executorLastError = pickText(error?.message, String(error));
+      });
+    }, this.executorTickMs);
+
+    if (typeof this.executorTimer.unref === 'function') {
+      this.executorTimer.unref();
+    }
+  }
+
+  async _executorTick() {
+    if (!this.executorEnabled || this.executorTickRunning) return;
+    this.executorTickRunning = true;
+
+    try {
+      const nowText = nowIso();
+      const heartbeatTouched = [];
+      const recovered = [];
+      const completeCandidates = [];
+
+      await this.taskStore.update((rows) => {
+        return toArray(rows).map((task) => {
+          if (!task || typeof task !== 'object') return task;
+
+          const next = { ...task };
+          const status = pickText(next.status).toLowerCase();
+          if (TASK_TERMINAL_STATUSES.has(status)) return next;
+
+          if (!status || status === 'pending') {
+            next.status = 'running';
+          }
+
+          let normalized = pickText(next.status).toLowerCase();
+          if (normalized === 'blocked') {
+            const stalledMs = Date.parse(pickText(next.stalledAt, next.lastHeartbeatAt, next.createdAt));
+            const canRecover = !Number.isFinite(stalledMs) || Date.now() - stalledMs >= EXECUTOR_BLOCKED_RECOVER_MS;
+            if (!canRecover) return next;
+
+            next.status = 'running';
+            next.stalledAt = '';
+            next.stalledReason = '';
+            recovered.push({ id: next.id, roleId: next.roleId, roleName: next.roleName, title: next.title });
+            normalized = 'running';
+          }
+
+          if (normalized !== 'running') return next;
+
+          const current = clamp(next.progressPercent, 0, 99);
+          const step = executorStepForTask(next);
+          next.progressPercent = Math.min(99, Math.max(5, current + step));
+          next.lastHeartbeatAt = nowText;
+          next.startedAt = pickText(next.startedAt, next.createdAt, nowText);
+          next.progressNote = `执行器自动心跳：进度 ${next.progressPercent}%`;
+          next.stalledAt = '';
+          next.stalledReason = '';
+
+          heartbeatTouched.push(next.id);
+          if (next.progressPercent >= EXECUTOR_AUTO_COMPLETE_AT) {
+            completeCandidates.push({ id: next.id, progressPercent: next.progressPercent });
+          }
+
+          return next;
+        });
+      });
+
+      for (const row of recovered) {
+        await this.logService.append({
+          action: 'squad.task.executor.recover',
+          type: 'squad',
+          target: row.roleId,
+          status: 'success',
+          message: `${row.roleName || row.roleId} 自动恢复任务：${row.title}`,
+          meta: { taskId: row.id }
+        });
+      }
+
+      for (const candidate of completeCandidates) {
+        try {
+          await this.reviewTask(candidate.id, buildExecutorReviewPayload(candidate));
+          this.executorStats.autoCompleted += 1;
+        } catch (error) {
+          const text = pickText(error?.message, '');
+          if (text.includes('未找到任务') || text.includes('任务已结束') || text.includes('任务已结束，无法提交心跳')) continue;
+          throw error;
+        }
+      }
+
+      this.executorLastTickAt = nowText;
+      this.executorStats.ticks += 1;
+      this.executorStats.heartbeatUpdates += heartbeatTouched.length;
+      this.executorStats.recoveredCount += recovered.length;
+      this.executorLastError = '';
+    } finally {
+      this.executorTickRunning = false;
+    }
   }
 
   async _normalizeTaskRuntime() {
@@ -524,6 +673,13 @@ class SquadService {
       roles: sortedRoles,
       tasks: taskRows.slice(0, 40),
       summary,
+      executor: {
+        enabled: this.executorEnabled,
+        tickMs: this.executorTickMs,
+        lastTickAt: this.executorLastTickAt,
+        lastError: this.executorLastError,
+        stats: { ...this.executorStats }
+      },
       captainDirective: CAPTAIN_DISPATCH_DOCTRINE,
       warningRoles: warningRoles.map((row) => ({
         id: row.id,

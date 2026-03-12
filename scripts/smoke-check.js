@@ -176,6 +176,9 @@ async function main() {
     if (!Array.isArray(data?.roles) || data.roles.length < 5) {
       throw new Error('expected seeded squad roles >= 5');
     }
+    if (typeof data?.executor?.enabled !== 'boolean') {
+      throw new Error('expected squad executor metadata');
+    }
   });
 
   await check('POST /api/squad/task auto-route(code) + review + reflection', async () => {

@@ -1480,10 +1480,19 @@ function renderSquadRoles() {
   dom.squadRoleBoard.innerHTML = '';
 
   const roles = toArray(state.squad.roles);
+  const executor = state.squad.executor || {};
   if (!roles.length) {
     dom.squadRoleBoard.appendChild(buildEmpty('暂无角色数据'));
     return;
   }
+
+  const executorItem = document.createElement('div');
+  executorItem.className = 'list-item';
+  const executorLine = document.createElement('small');
+  const tickSec = Math.max(1, Math.round(Number(executor.tickMs || 0) / 1000));
+  executorLine.textContent = `执行器：${executor.enabled ? '已启用' : '未启用'}｜tick ${tickSec}s｜最近心跳 ${formatTime(executor.lastTickAt)}｜自动闭环 ${formatNumber(executor.stats?.autoCompleted)} 次`;
+  executorItem.append(executorLine);
+  dom.squadRoleBoard.appendChild(executorItem);
 
   roles.forEach((role) => {
     const item = document.createElement('div');
