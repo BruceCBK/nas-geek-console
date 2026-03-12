@@ -344,7 +344,23 @@ class SquadService {
     const roleRows = toArray(roles);
     const taskRows = toArray(tasks);
 
-    const sortedRoles = roleRows
+    const computedRoles = roleRows.map((role) => {
+      const roleTasks = taskRows.filter((task) => task && task.roleId === role.id);
+      const doneTasks = roleTasks.filter((task) => task.status === 'completed');
+      const failedTasks = roleTasks.filter((task) => task.status === 'failed');
+      const pendingTasks = roleTasks.filter((task) => task.status === 'pending');
+      return {
+        ...role,
+        totalTasks: roleTasks.length,
+        doneTasks: doneTasks.length,
+        failedTasks: failedTasks.length,
+        pendingTasks: pendingTasks.length,
+        avgCompletion: Math.round(avg(roleTasks.map((task) => Number(task.completion) || 0))),
+        avgQuality: Math.round(avg(roleTasks.map((task) => Number(task.quality) || 0)))
+      };
+    });
+
+    const sortedRoles = computedRoles
       .slice()
       .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
 
