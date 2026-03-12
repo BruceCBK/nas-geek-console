@@ -1508,8 +1508,11 @@ function renderSquadRoles() {
     const status = pickText(role.status, blockedCount > 0 || Number(role.score) < 60 ? 'warning' : 'active').toLowerCase();
     const badge = buildBadge(status);
 
+    const pressureCount = Number(role.blockedPressure24h) || 0;
+    const pressureMul = Number(role.blockedPenaltyMultiplier) || 1;
+
     const meta = document.createElement('small');
-    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)} · 历史失败 ${formatNumber(role.failureEvents)}`;
+    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)} · 历史失败 ${formatNumber(role.failureEvents)} · 24h阻塞压力 ${formatNumber(pressureCount)} · 惩罚倍率 x${pressureMul.toFixed(2)}`;
 
     const stat = document.createElement('small');
     stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;

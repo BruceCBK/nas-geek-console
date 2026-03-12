@@ -173,6 +173,28 @@ function blockedPenaltyByWeight(weight) {
   return -BLOCKED_PENALTY_PER_WEIGHT * w;
 }
 
+function blockedPenaltyMultiplier(recentBlockedCount = 0) {
+  const count = Math.max(0, Number(recentBlockedCount) || 0);
+  if (count >= 10) return 2;
+  if (count >= 6) return 1.5;
+  if (count >= 3) return 1.25;
+  return 1;
+}
+
+function recentBlockedCountForRole(taskRows = [], roleId, nowMs = Date.now()) {
+  if (!roleId) return 0;
+  const windowMs = 24 * 60 * 60 * 1000;
+
+  return toArray(taskRows)
+    .filter((task) => task && task.roleId === roleId)
+    .reduce((sum, task) => {
+      const blockedAtText = pickText(task.lastBlockedAt, task.stalledAt, task.blockedAt);
+      const blockedMs = Date.parse(blockedAtText);
+      if (!Number.isFinite(blockedMs) || nowMs - blockedMs > windowMs) return sum;
+      return sum + Math.max(1, Number(task.blockedCount) || 0);
+    }, 0);
+}
+
 function executorStepForTask(task = {}) {
   const roleId = pickText(task.roleId);
   const base = EXECUTOR_ROLE_PROGRESS_STEP[roleId] || 10;
@@ -320,6 +342,9 @@ function buildTaskRow({
     lastHeartbeatAt: ts,
     stalledAt: '',
     stalledReason: '',
+    blockedCount: 0,
+    lastBlockedAt: '',
+    blockedPenaltyApplied: false,
     completion: 0,
     quality: 0,
     ownerScore: 0,
@@ -345,6 +370,8 @@ function roleTemplate(base = {}) {
     doneTasks: 0,
     failedTasks: 0,
     failureEvents: 0,
+    blockedPressure24h: 0,
+    blockedPenaltyMultiplier: 1,
     avgCompletion: 0,
     avgQuality: 0,
     warningCount: 0,
@@ -392,6 +419,8 @@ class SquadService {
           score,
           dispatchDoctrine: pickText(role?.dispatchDoctrine, CAPTAIN_DISPATCH_DOCTRINE),
           failureEvents: Number(role?.failureEvents) || Number(role?.failedTasks) || 0,
+          blockedPressure24h: Math.max(0, Number(role?.blockedPressure24h) || 0),
+          blockedPenaltyMultiplier: Math.max(1, Number(role?.blockedPenaltyMultiplier) || 1),
           status
         };
       });
@@ -451,6 +480,7 @@ class SquadService {
             next.status = 'running';
             next.stalledAt = '';
             next.stalledReason = '';
+            next.blockedPenaltyApplied = false;
             recovered.push({ id: next.id, roleId: next.roleId, roleName: next.roleName, title: next.title });
             normalized = 'running';
           }
@@ -512,7 +542,7 @@ class SquadService {
     const nowText = nowIso();
     const newlyBlocked = [];
 
-    await this.taskStore.update((rows) => {
+    const updatedTasks = await this.taskStore.update((rows) => {
       return toArray(rows).map((task) => {
         if (!task || typeof task !== 'object') return task;
 
@@ -523,7 +553,7 @@ class SquadService {
           next.status = 'running';
         }
 
-        const normalized = pickText(next.status).toLowerCase();
+        let normalized = pickText(next.status).toLowerCase();
         if (!TASK_OPEN_STATUSES.has(normalized)) {
           if (TASK_TERMINAL_STATUSES.has(normalized)) {
             next.progressPercent = 100;
@@ -537,12 +567,20 @@ class SquadService {
         const hbMs = Date.parse(next.lastHeartbeatAt);
         const isStale = Number.isFinite(hbMs) && nowMs - hbMs > TASK_RUNNING_STALE_MS;
         if (isStale) {
+          const wasBlocked = normalized === 'blocked';
+
           next.status = 'blocked';
           next.stalledAt = pickText(next.stalledAt, nowText);
           next.stalledReason = pickText(
             next.stalledReason,
             '超过8分钟无进展心跳，状态已标记为 blocked，请跟进或重派。'
           );
+
+          if (!wasBlocked) {
+            next.blockedCount = Math.max(0, Number(next.blockedCount) || 0) + 1;
+            next.lastBlockedAt = nowText;
+            next.blockedPenaltyApplied = false;
+          }
 
           if (!next.blockedPenaltyApplied) {
             next.blockedPenaltyApplied = true;
@@ -551,7 +589,9 @@ class SquadService {
               roleId: pickText(next.roleId),
               roleName: pickText(next.roleName),
               title: pickText(next.title),
-              weight: clamp(next.weight, 1, 3)
+              weight: clamp(next.weight, 1, 3),
+              blockedCount: Math.max(1, Number(next.blockedCount) || 1),
+              lastBlockedAt: pickText(next.lastBlockedAt, next.stalledAt)
             });
           }
         }
@@ -567,13 +607,23 @@ class SquadService {
     const rolePenaltyMap = new Map();
     for (const task of newlyBlocked) {
       if (!task.roleId) continue;
+
+      const recentBlockedCount = recentBlockedCountForRole(updatedTasks, task.roleId, nowMs);
+      const multiplier = blockedPenaltyMultiplier(recentBlockedCount);
+      const penalty = Math.round(blockedPenaltyByWeight(task.weight) * multiplier);
+
       const current = rolePenaltyMap.get(task.roleId) || {
         delta: 0,
         failures: 0,
-        roleName: task.roleName
+        roleName: task.roleName,
+        recentBlockedCount,
+        multiplier
       };
-      current.delta += blockedPenaltyByWeight(task.weight);
+
+      current.delta += penalty;
       current.failures += 1;
+      current.recentBlockedCount = Math.max(current.recentBlockedCount || 0, recentBlockedCount);
+      current.multiplier = Math.max(current.multiplier || 1, multiplier);
       current.delta = Math.max(current.delta, -MAX_BLOCKED_PENALTY_PER_SWEEP);
       rolePenaltyMap.set(task.roleId, current);
     }
@@ -593,6 +643,8 @@ class SquadService {
           status: nextStatus,
           failedTasks: nextFailureEvents,
           failureEvents: nextFailureEvents,
+          blockedPressure24h: patch.recentBlockedCount,
+          blockedPenaltyMultiplier: patch.multiplier,
           warningCount: (Number(role?.warningCount) || 0) + (nextStatus === 'warning' ? 1 : 0),
           reflection: pickText(role?.reflection, '出现阻塞任务，需复盘根因并提交改进措施。'),
           updatedAt: nowIso()
@@ -601,6 +653,10 @@ class SquadService {
     });
 
     for (const task of newlyBlocked) {
+      const recentBlockedCount = recentBlockedCountForRole(updatedTasks, task.roleId, nowMs);
+      const multiplier = blockedPenaltyMultiplier(recentBlockedCount);
+      const penalty = Math.round(blockedPenaltyByWeight(task.weight) * multiplier);
+
       await this.logService.append({
         action: 'squad.task.blocked',
         type: 'squad',
@@ -609,7 +665,11 @@ class SquadService {
         message: `${task.roleName || task.roleId} 任务阻塞：${task.title || task.id}`,
         meta: {
           taskId: task.id,
-          penalty: blockedPenaltyByWeight(task.weight),
+          penalty,
+          multiplier,
+          recentBlockedCount,
+          blockedCount: task.blockedCount,
+          blockedAt: task.lastBlockedAt,
           reason: 'no-heartbeat-timeout'
         }
       });
@@ -626,6 +686,7 @@ class SquadService {
     const roleRows = toArray(roles);
     const taskRows = toArray(tasks);
 
+    const nowMs = Date.now();
     const computedRoles = roleRows.map((role) => {
       const roleTasks = taskRows.filter((task) => task && task.roleId === role.id);
       const doneTasks = roleTasks.filter((task) => task.status === 'completed');
@@ -633,6 +694,8 @@ class SquadService {
       const blockedTasks = roleTasks.filter((task) => task.status === 'blocked');
       const pendingTasks = roleTasks.filter((task) => TASK_OPEN_STATUSES.has(pickText(task.status).toLowerCase()));
       const unresolvedFailures = failedTasks.length + blockedTasks.length;
+      const recentBlockedCount = recentBlockedCountForRole(taskRows, role.id, nowMs);
+      const pressureMultiplier = blockedPenaltyMultiplier(recentBlockedCount);
       const failureEvents = Math.max(
         Number(role?.failureEvents) || 0,
         Number(role?.failedTasks) || 0,
@@ -648,6 +711,8 @@ class SquadService {
         failedTasks: unresolvedFailures,
         failureEvents,
         blockedTasks: blockedTasks.length,
+        blockedPressure24h: recentBlockedCount,
+        blockedPenaltyMultiplier: pressureMultiplier,
         pendingTasks: pendingTasks.length,
         avgCompletion: Math.round(avg(roleTasks.map((task) => Number(task.completion) || 0))),
         avgQuality: Math.round(avg(roleTasks.map((task) => Number(task.quality) || 0)))
@@ -665,7 +730,8 @@ class SquadService {
       warningRoles: warningRoles.length,
       totalTasks: taskRows.length,
       completedTasks: taskRows.filter((t) => t.status === 'completed').length,
-      failedTasks: taskRows.filter((t) => t.status === 'failed').length,
+      failedTasks: taskRows.filter((t) => t.status === 'failed' || t.status === 'blocked').length,
+      blockedTasks: taskRows.filter((t) => t.status === 'blocked').length,
       pendingTasks: taskRows.filter((t) => TASK_OPEN_STATUSES.has(pickText(t.status).toLowerCase())).length
     };
 
@@ -932,6 +998,7 @@ class SquadService {
         progressPercent: Math.max(clamp(current.progressPercent, 0, 99), progressPercent, 5),
         stalledAt: '',
         stalledReason: '',
+        blockedPenaltyApplied: false,
         progressNote: note || pickText(current.progressNote)
       };
       list[idx] = next;

@@ -179,6 +179,9 @@ async function main() {
     if (typeof data?.executor?.enabled !== 'boolean') {
       throw new Error('expected squad executor metadata');
     }
+    if (typeof data?.roles?.[0]?.blockedPenaltyMultiplier !== 'number') {
+      throw new Error('expected role blocked penalty multiplier');
+    }
   });
 
   await check('POST /api/squad/task auto-route(code) + review + reflection', async () => {
