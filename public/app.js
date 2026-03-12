@@ -116,7 +116,10 @@ const state = {
     roles: [],
     tasks: [],
     summary: {},
-    warningRoles: []
+    warningRoles: [],
+    executor: {},
+    causeLabels: {},
+    reporting: {}
   },
 
   trendingData: null,
@@ -1463,7 +1466,10 @@ async function loadSquadState() {
     roles: toArray(payload.roles),
     tasks: toArray(payload.tasks),
     summary: asObject(payload.summary),
-    warningRoles: toArray(payload.warningRoles)
+    warningRoles: toArray(payload.warningRoles),
+    executor: asObject(payload.executor),
+    causeLabels: asObject(payload.causeLabels),
+    reporting: asObject(payload.reporting)
   };
   renderSquadState();
 }
@@ -1494,6 +1500,39 @@ function renderSquadRoles() {
   executorLine.textContent = `执行器：${executor.enabled ? '已启用' : '未启用'}｜tick ${tickSec}s｜最近心跳 ${formatTime(executor.lastTickAt)}｜自动闭环 ${formatNumber(executor.stats?.autoCompleted)} 次`;
   executorItem.append(executorLine);
   dom.squadRoleBoard.appendChild(executorItem);
+
+  const reporting = state.squad.reporting || {};
+  const alertRows = toArray(reporting.alerts).slice(0, 4).map((item) => pickText(item)).filter(Boolean);
+  const memoryRows = toArray(reporting.memoryTips).slice(0, 3).map((item) => pickText(item)).filter(Boolean);
+  if (pickText(reporting.liveBrief) || alertRows.length || memoryRows.length) {
+    const reportItem = document.createElement('div');
+    reportItem.className = 'list-item';
+
+    if (pickText(reporting.liveBrief)) {
+      const brief = document.createElement('small');
+      brief.textContent = `实时播报：${pickText(reporting.liveBrief)}`;
+      reportItem.append(brief);
+    }
+
+    if (alertRows.length) {
+      const alert = document.createElement('small');
+      alert.className = 'warning-text';
+      alert.textContent = `风险提醒：${alertRows.join(' ｜ ')}`;
+      reportItem.append(alert);
+    }
+
+    if (memoryRows.length) {
+      const memo = document.createElement('small');
+      memo.textContent = `记忆建议：${memoryRows.join(' ｜ ')}`;
+      reportItem.append(memo);
+    }
+
+    const engine = document.createElement('small');
+    engine.textContent = `播报引擎：${pickText(reporting.engine, 'unknown')} · ${formatTime(reporting.generatedAt)}`;
+    reportItem.append(engine);
+
+    dom.squadRoleBoard.appendChild(reportItem);
+  }
 
   roles.forEach((role) => {
     const item = document.createElement('div');

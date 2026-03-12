@@ -1,4 +1,7 @@
 const crypto = require('crypto');
+const path = require('path');
+const { existsSync } = require('fs');
+const { spawn } = require('child_process');
 const { HttpError } = require('../utils/http-error');
 const { nowIso, pickText, toArray } = require('../utils/text');
 
@@ -47,6 +50,17 @@ const CAUSE_LABELS = {
   collab_lag: '协同卡点',
   execution_stagnation: '执行停滞'
 };
+
+const PY311_REPORTER_SCRIPT = path.resolve(__dirname, '../../scripts/squad-reporting-py311.py');
+const PY311_REPORTER_CONFIG = path.resolve(__dirname, '../../config/squad-reporting.toml');
+const PY311_REPORTER_TIMEOUT_MS = Math.max(
+  600,
+  Number.parseInt(process.env.SQUAD_REPORTER_TIMEOUT_MS || '1600', 10) || 1600
+);
+const SQUAD_REPORT_CACHE_MS = Math.max(
+  4000,
+  Number.parseInt(process.env.SQUAD_REPORT_CACHE_MS || '12000', 10) || 12000
+);
 
 const DEFAULT_ROLES = [
   {
@@ -499,6 +513,122 @@ function roleTemplate(base = {}) {
   };
 }
 
+
+function parseIsoMs(input) {
+  const ms = Date.parse(pickText(input));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function buildJsFallbackReporting({ roles = [], tasks = [], executor = {}, reason = '' } = {}) {
+  const blocked = toArray(tasks).filter((task) => pickText(task?.status).toLowerCase() === 'blocked');
+  const atRisk = toArray(tasks).filter((task) => pickText(task?.runtimeRisk).toLowerCase() === 'at-risk');
+  const running = toArray(tasks).filter((task) => {
+    const status = pickText(task?.status).toLowerCase();
+    return status === 'running' || status === 'pending';
+  });
+  const avgScore = Math.round(avg(toArray(roles).map((role) => Number(role?.score) || 0)));
+
+  const alerts = blocked
+    .slice()
+    .sort((a, b) => parseIsoMs(b?.lastHeartbeatAt || b?.createdAt) - parseIsoMs(a?.lastHeartbeatAt || a?.createdAt))
+    .slice(0, 4)
+    .map((task) => {
+      const roleName = pickText(task?.roleName, task?.roleId, '-');
+      const title = pickText(task?.title, task?.id, '未知任务');
+      return `[BLOCKED] ${title} @ ${roleName}`;
+    });
+
+  const memoryTips = toArray(tasks)
+    .filter((task) => pickText(task?.status).toLowerCase() === 'completed')
+    .slice()
+    .sort((a, b) => parseIsoMs(b?.gradedAt || b?.lastHeartbeatAt) - parseIsoMs(a?.gradedAt || a?.lastHeartbeatAt))
+    .slice(0, 4)
+    .map((task) => {
+      const roleName = pickText(task?.roleName, task?.roleId, '-');
+      const title = pickText(task?.title, task?.id, '未知任务');
+      return `记忆候选：${roleName} 完成《${title}》`; 
+    });
+
+  const fallbackReason = pickText(reason) ? `｜fallback: ${pickText(reason)}` : '';
+
+  return {
+    engine: 'js-fallback-v1',
+    generatedAt: nowIso(),
+    liveBrief: `任务 ${toArray(tasks).length}｜进行中 ${running.length}｜风险 ${atRisk.length}｜阻塞 ${blocked.length}｜角色均分 ${avgScore}｜执行器 ${executor?.enabled ? 'ON' : 'OFF'}${fallbackReason}`,
+    alerts,
+    memoryTips,
+    errors: pickText(reason) ? [pickText(reason)] : []
+  };
+}
+
+function runPy311Reporter(input = {}, options = {}) {
+  const timeoutMs = Math.max(400, Number(options.timeoutMs) || PY311_REPORTER_TIMEOUT_MS);
+
+  if (!existsSync(PY311_REPORTER_SCRIPT)) {
+    return Promise.reject(new Error(`python reporter missing: ${PY311_REPORTER_SCRIPT}`));
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('python3.11', [PY311_REPORTER_SCRIPT], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      reject(new Error(`python reporter timeout(${timeoutMs}ms)`));
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk || '');
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk || '');
+    });
+
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+
+      if (code !== 0) {
+        reject(new Error(`python reporter exit=${code}: ${pickText(stderr, 'unknown error')}`));
+        return;
+      }
+
+      let parsed = null;
+      try {
+        parsed = stdout ? JSON.parse(stdout) : null;
+      } catch (error) {
+        reject(new Error(`python reporter parse error: ${pickText(error?.message, String(error))}`));
+        return;
+      }
+
+      if (!parsed || typeof parsed !== 'object') {
+        reject(new Error('python reporter empty payload'));
+        return;
+      }
+
+      resolve(parsed);
+    });
+
+    child.stdin.end(JSON.stringify(input));
+  });
+}
+
 class SquadService {
   constructor(roleStore, taskStore, logService) {
     this.roleStore = roleStore;
@@ -517,6 +647,62 @@ class SquadService {
       recoveredCount: 0,
       autoCompleted: 0
     };
+    this.reportingCacheMs = SQUAD_REPORT_CACHE_MS;
+    this.reportingCache = {
+      atMs: 0,
+      payload: null
+    };
+  }
+
+  _invalidateReportingCache() {
+    this.reportingCache = {
+      atMs: 0,
+      payload: null
+    };
+  }
+
+  async _buildReportingSnapshot({ roles = [], tasks = [], summary = {}, executor = {}, causeLabels = {} } = {}) {
+    const nowMs = Date.now();
+    if (this.reportingCache.payload && nowMs - Number(this.reportingCache.atMs || 0) <= this.reportingCacheMs) {
+      return this.reportingCache.payload;
+    }
+
+    const input = {
+      roles,
+      tasks: toArray(tasks).slice(0, 120),
+      summary,
+      executor,
+      causeLabels,
+      configPath: PY311_REPORTER_CONFIG,
+      now: nowIso()
+    };
+
+    let snapshot = null;
+    try {
+      snapshot = await runPy311Reporter(input, { timeoutMs: PY311_REPORTER_TIMEOUT_MS });
+      snapshot = {
+        engine: pickText(snapshot?.engine, 'py311-taskgroup-v1'),
+        generatedAt: pickText(snapshot?.generatedAt, nowIso()),
+        liveBrief: pickText(snapshot?.liveBrief),
+        alerts: toArray(snapshot?.alerts).map((item) => pickText(item)).filter(Boolean),
+        memoryTips: toArray(snapshot?.memoryTips).map((item) => pickText(item)).filter(Boolean),
+        errors: toArray(snapshot?.errors).map((item) => pickText(item)).filter(Boolean)
+      };
+    } catch (error) {
+      snapshot = buildJsFallbackReporting({
+        roles,
+        tasks,
+        executor,
+        reason: pickText(error?.message, String(error))
+      });
+    }
+
+    this.reportingCache = {
+      atMs: nowMs,
+      payload: snapshot
+    };
+
+    return snapshot;
   }
 
   async init() {
@@ -666,6 +852,7 @@ class SquadService {
       this.executorStats.heartbeatUpdates += heartbeatTouched.length;
       this.executorStats.recoveredCount += recovered.length;
       this.executorLastError = '';
+      this._invalidateReportingCache();
     } finally {
       this.executorTickRunning = false;
     }
@@ -755,6 +942,7 @@ class SquadService {
       });
     });
 
+    this._invalidateReportingCache();
     if (!newlyBlocked.length) return;
 
     const roleOpenLoadMap = buildRoleOpenLoadMap(updatedTasks);
@@ -951,18 +1139,29 @@ class SquadService {
       pendingTasks: taskRows.filter((t) => TASK_OPEN_STATUSES.has(pickText(t.status).toLowerCase())).length
     };
 
+    const executor = {
+      enabled: this.executorEnabled,
+      tickMs: this.executorTickMs,
+      lastTickAt: this.executorLastTickAt,
+      lastError: this.executorLastError,
+      stats: { ...this.executorStats }
+    };
+    const causeLabels = { ...CAUSE_LABELS };
+    const reporting = await this._buildReportingSnapshot({
+      roles: sortedRoles,
+      tasks: taskRows,
+      summary,
+      executor,
+      causeLabels
+    });
+
     return {
       roles: sortedRoles,
       tasks: taskRows.slice(0, 40),
       summary,
-      executor: {
-        enabled: this.executorEnabled,
-        tickMs: this.executorTickMs,
-        lastTickAt: this.executorLastTickAt,
-        lastError: this.executorLastError,
-        stats: { ...this.executorStats }
-      },
-      causeLabels: { ...CAUSE_LABELS },
+      executor,
+      causeLabels,
+      reporting,
       captainDirective: CAPTAIN_DISPATCH_DOCTRINE,
       warningRoles: warningRoles.map((row) => ({
         id: row.id,
@@ -1065,6 +1264,7 @@ class SquadService {
       });
     }
 
+    this._invalidateReportingCache();
     return {
       task,
       linkedTasks
@@ -1238,6 +1438,7 @@ class SquadService {
       }
     });
 
+    this._invalidateReportingCache();
     return {
       task: {
         ...updatedTask,
@@ -1300,6 +1501,7 @@ class SquadService {
       }
     });
 
+    this._invalidateReportingCache();
     return updatedTask;
   }
 
@@ -1339,6 +1541,7 @@ class SquadService {
       meta: { score: updated.score }
     });
 
+    this._invalidateReportingCache();
     return updated;
   }
 }

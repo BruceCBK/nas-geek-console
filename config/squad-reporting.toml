@@ -1,0 +1,5 @@
+[reporting]
+alert_limit = 4
+memory_tip_limit = 5
+stale_minutes = 8
+at_risk_minutes = 4

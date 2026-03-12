@@ -188,6 +188,15 @@ async function main() {
     if (!data?.causeLabels || typeof data.causeLabels !== 'object') {
       throw new Error('expected squad causeLabels metadata');
     }
+    if (!data?.reporting || typeof data.reporting !== 'object') {
+      throw new Error('expected squad reporting payload');
+    }
+    if (typeof data?.reporting?.liveBrief !== 'string') {
+      throw new Error('expected squad reporting liveBrief');
+    }
+    if (!Array.isArray(data?.reporting?.memoryTips)) {
+      throw new Error('expected squad reporting memoryTips array');
+    }
   });
 
   await check('POST /api/squad/task auto-route(code) + review + reflection', async () => {
