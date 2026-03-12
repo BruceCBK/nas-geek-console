@@ -6,12 +6,19 @@ const BASE_SCORE = 100;
 const MAX_SCORE = 100;
 const WARNING_SCORE = 60;
 const AUTO_ROLE_ID = 'auto';
+const CAPTAIN_DISPATCH_DOCTRINE =
+  '队长派工原则：按任务语义分工、关联任务联动、负载均衡优先，禁止单角色垄断。';
 const AUTO_ROLE_KEYWORDS = {
-  'code-claw': ['code', 'dev', 'bug', 'fix', 'refactor'],
-  'radar-qa': ['test', 'qa', 'regression'],
-  'ops-tide': ['deploy', 'restart', 'ops', 'perf'],
-  'doc-pulse': ['doc', 'readme', 'changelog'],
-  'neon-scout': ['research', 'search', 'info']
+  'code-claw': ['code', 'dev', 'bug', 'fix', 'refactor', '编码', '代码', '开发', '修复', '重构', '实现', '功能'],
+  'radar-qa': ['test', 'qa', 'regression', '测试', '回归', '验收', '验证', '质检', '边界'],
+  'ops-tide': ['deploy', 'restart', 'ops', 'perf', '运维', '发布', '部署', '重启', '巡检', '性能', '稳定性'],
+  'doc-pulse': ['doc', 'readme', 'changelog', '文档', '说明', '手册', '记录', '变更日志', '复盘'],
+  'neon-scout': ['research', 'search', 'info', '调研', '检索', '情报', '信息', '线索', '分析']
+};
+const COLLAB_POLICY = {
+  'code-claw': ['radar-qa', 'doc-pulse'],
+  'ops-tide': ['radar-qa', 'doc-pulse'],
+  'radar-qa': ['doc-pulse']
 };
 
 const DEFAULT_ROLES = [
@@ -68,6 +75,21 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function isAsciiWordToken(token) {
+  return /^[a-z0-9-]+$/i.test(token);
+}
+
+function hasKeyword(source, token) {
+  if (!source || !token) return false;
+
+  if (isAsciiWordToken(token)) {
+    const pattern = new RegExp(`\\b${escapeRegExp(token)}[a-z0-9-]*\\b`, 'i');
+    return pattern.test(source);
+  }
+
+  return source.includes(token);
+}
+
 function findKeywordMatches(text, keywords = []) {
   const source = pickText(text).toLowerCase();
   if (!source) return [];
@@ -75,8 +97,7 @@ function findKeywordMatches(text, keywords = []) {
   return keywords.filter((keyword) => {
     const token = pickText(keyword).toLowerCase();
     if (!token) return false;
-    const pattern = new RegExp(`\\b${escapeRegExp(token)}[a-z0-9-]*\\b`, 'i');
-    return pattern.test(source);
+    return hasKeyword(source, token);
   });
 }
 
@@ -132,6 +153,30 @@ function describeLoad(load = {}) {
   return `pending=${Number(load.pending) || 0}, total=${Number(load.total) || 0}`;
 }
 
+function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], loadMap = new Map() }) {
+  const policyRoles = toArray(COLLAB_POLICY[primaryRoleId]);
+  const matchedSecondary = scoredRows
+    .filter((row) => row?.role?.id && row.role.id !== primaryRoleId)
+    .map((row) => row.role.id);
+
+  const unique = Array.from(new Set([...matchedSecondary, ...policyRoles]));
+  if (!unique.length) return [];
+
+  const roleMap = new Map(toArray(roles).map((r) => [r.id, r]));
+  return unique
+    .map((id) => roleMap.get(id))
+    .filter(Boolean)
+    .sort((a, b) => {
+      const left = getLoad(loadMap, a.id);
+      const right = getLoad(loadMap, b.id);
+      if (left.pending !== right.pending) return left.pending - right.pending;
+      if (left.total !== right.total) return left.total - right.total;
+      return pickText(a.id).localeCompare(pickText(b.id));
+    })
+    .slice(0, 3)
+    .map((role) => role.id);
+}
+
 function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title, description }) {
   const roleRows = toArray(roles);
   if (!roleRows.length) {
@@ -148,6 +193,8 @@ function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title,
     const manualLoad = getLoad(loadMap, manualRole.id);
     return {
       role: manualRole,
+      matchedRoleIds: [manualRole.id],
+      collaborationRoleIds: [],
       assignmentMode: 'manual',
       assignmentReason: `manual roleId=${manualRole.id}; ${describeLoad(manualLoad)}`
     };
@@ -170,9 +217,17 @@ function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title,
       loadMap
     );
     const pickedRow = candidates.find((row) => row.role.id === picked?.id);
+    const collaborationRoleIds = pickCollaborationRoles({
+      primaryRoleId: picked.id,
+      scoredRows: scored,
+      roles: roleRows,
+      loadMap
+    });
     const pickedLoad = getLoad(loadMap, picked.id);
     return {
       role: picked,
+      matchedRoleIds: scored.map((row) => row.role.id),
+      collaborationRoleIds,
       assignmentMode: 'auto.keyword',
       assignmentReason: `auto keyword[${pickedRow?.matches?.join(', ') || ''}] -> ${picked.id}; ${describeLoad(pickedLoad)}`
     };
@@ -182,8 +237,47 @@ function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title,
   const pickedLoad = getLoad(loadMap, picked.id);
   return {
     role: picked,
+    matchedRoleIds: [],
+    collaborationRoleIds: [],
     assignmentMode: 'auto.balance',
     assignmentReason: `auto balance(no keyword) -> ${picked.id}; ${describeLoad(pickedLoad)}`
+  };
+}
+
+function buildTaskRow({
+  id,
+  title,
+  description,
+  role,
+  weight,
+  assignmentMode,
+  assignmentReason,
+  taskGroupId,
+  parentTaskId,
+  relationType = 'primary'
+}) {
+  return {
+    id: id || crypto.randomUUID(),
+    title,
+    description,
+    roleId: role.id,
+    roleName: role.name,
+    assignmentMode,
+    assignmentReason,
+    taskGroupId: pickText(taskGroupId),
+    parentTaskId: pickText(parentTaskId),
+    relationType,
+    weight,
+    status: 'pending',
+    completion: 0,
+    quality: 0,
+    ownerScore: 0,
+    captainScore: 0,
+    passed: false,
+    scoreDelta: 0,
+    reviewNote: '',
+    createdAt: nowIso(),
+    gradedAt: ''
   };
 }
 
@@ -203,6 +297,7 @@ function roleTemplate(base = {}) {
     avgQuality: 0,
     warningCount: 0,
     reflection: '',
+    dispatchDoctrine: CAPTAIN_DISPATCH_DOCTRINE,
     updatedAt: nowIso()
   };
 }
@@ -221,7 +316,6 @@ class SquadService {
     await this._normalizeRoleScores();
   }
 
-
   async _normalizeRoleScores() {
     await this.roleStore.update((rows) => {
       return toArray(rows).map((role) => {
@@ -230,6 +324,7 @@ class SquadService {
         return {
           ...role,
           score,
+          dispatchDoctrine: pickText(role?.dispatchDoctrine, CAPTAIN_DISPATCH_DOCTRINE),
           status
         };
       });
@@ -268,6 +363,7 @@ class SquadService {
       roles: sortedRoles,
       tasks: taskRows.slice(0, 40),
       summary,
+      captainDirective: CAPTAIN_DISPATCH_DOCTRINE,
       warningRoles: warningRoles.map((row) => ({
         id: row.id,
         name: row.name,
@@ -285,8 +381,9 @@ class SquadService {
 
     if (!title) throw new HttpError(400, 'SQUAD_TASK_TITLE_REQUIRED', '任务标题不能为空');
     const [roles, tasks] = await Promise.all([this.roleStore.read(), this.taskStore.read()]);
+    const roleRows = toArray(roles);
     const assignment = resolveRoleAssignment({
-      roles: toArray(roles),
+      roles: roleRows,
       tasks: toArray(tasks),
       requestedRoleId,
       title,
@@ -294,30 +391,42 @@ class SquadService {
     });
     const role = assignment.role;
 
-    const task = {
-      id: crypto.randomUUID(),
+    const taskGroupId = crypto.randomUUID();
+    const task = buildTaskRow({
       title,
       description,
-      roleId: role.id,
-      roleName: role.name,
-      assignmentMode: assignment.assignmentMode,
-      assignmentReason: assignment.assignmentReason,
+      role,
       weight,
-      status: 'pending',
-      completion: 0,
-      quality: 0,
-      ownerScore: 0,
-      captainScore: 0,
-      passed: false,
-      scoreDelta: 0,
-      reviewNote: '',
-      createdAt: nowIso(),
-      gradedAt: ''
-    };
+      assignmentMode: assignment.assignmentMode,
+      assignmentReason: `${assignment.assignmentReason} ｜ ${CAPTAIN_DISPATCH_DOCTRINE}`,
+      taskGroupId,
+      relationType: 'primary'
+    });
+
+    const linkedTasks = assignment.collaborationRoleIds
+      .map((roleId) => roleRows.find((r) => r.id === roleId))
+      .filter(Boolean)
+      .map((linkedRole) => {
+        const linkedReason = `auto collab from ${role.id} -> ${linkedRole.id}; ${CAPTAIN_DISPATCH_DOCTRINE}`;
+        return buildTaskRow({
+          title: `[协同] ${title}`,
+          description: pickText(
+            description,
+            `协同子任务：请从 ${linkedRole.name} 视角跟进主任务 ${task.id}`
+          ),
+          role: linkedRole,
+          weight,
+          assignmentMode: 'auto.collab',
+          assignmentReason: linkedReason,
+          taskGroupId,
+          parentTaskId: task.id,
+          relationType: 'linked'
+        });
+      });
 
     await this.taskStore.update((rows) => {
       const list = toArray(rows);
-      list.unshift(task);
+      list.unshift(task, ...linkedTasks);
       if (list.length > this.maxTasks) list.length = this.maxTasks;
       return list;
     });
@@ -332,11 +441,33 @@ class SquadService {
         taskId: task.id,
         requestedRoleId: requestedRoleId || AUTO_ROLE_ID,
         assignmentMode: task.assignmentMode,
-        assignmentReason: task.assignmentReason
+        assignmentReason: task.assignmentReason,
+        taskGroupId,
+        linkedTaskIds: linkedTasks.map((row) => row.id)
       }
     });
 
-    return task;
+    for (const linked of linkedTasks) {
+      await this.logService.append({
+        action: 'squad.task.create.linked',
+        type: 'squad',
+        target: linked.roleId,
+        status: 'success',
+        message: `${linked.roleName} 接收协同任务：${linked.title}`,
+        meta: {
+          taskId: linked.id,
+          parentTaskId: task.id,
+          taskGroupId,
+          assignmentMode: linked.assignmentMode,
+          assignmentReason: linked.assignmentReason
+        }
+      });
+    }
+
+    return {
+      task,
+      linkedTasks
+    };
   }
 
   async reviewTask(taskId, payload = {}) {

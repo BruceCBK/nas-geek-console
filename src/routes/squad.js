@@ -26,13 +26,15 @@ function createSquadRouter({ squadService }) {
   router.post(
     '/task',
     asyncHandler(async (req, res) => {
-      const task = await squadService.createTask({
+      const output = await squadService.createTask({
         title: req.body?.title,
         description: req.body?.description,
         roleId: req.body?.roleId,
         weight: req.body?.weight
       });
-      return sendSuccess(res, { task }, { legacy: { task } });
+
+      const payload = output && output.task ? output : { task: output, linkedTasks: [] };
+      return sendSuccess(res, payload, { legacy: payload });
     })
   );
 

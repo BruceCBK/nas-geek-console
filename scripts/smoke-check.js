@@ -199,7 +199,9 @@ async function main() {
       throw new Error(`create task expected 200, got ${createRes.status}`);
     }
 
-    const createdTask = getData(createRes.body)?.task;
+    const createdPayload = getData(createRes.body) || {};
+    const createdTask = createdPayload?.task;
+    const linkedTasks = Array.isArray(createdPayload?.linkedTasks) ? createdPayload.linkedTasks : [];
     const taskId = createdTask?.id;
     if (!taskId) throw new Error('missing squad task id');
     if (createdTask?.roleId !== 'code-claw') {
@@ -207,6 +209,9 @@ async function main() {
     }
     if (!createdTask?.assignmentReason) {
       throw new Error('missing assignmentReason in squad task payload');
+    }
+    if (!linkedTasks.some((row) => row?.roleId === 'radar-qa')) {
+      throw new Error('expected linked collaboration task for radar-qa');
     }
 
     const reviewRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/review`, {
@@ -225,14 +230,14 @@ async function main() {
       throw new Error(`review task expected 200, got ${reviewRes.status}`);
     }
 
-    const reflectionRes = await request(
-      `/api/squad/role/${encodeURIComponent(createdTask.roleId)}/reflection`,
-      {
+    const reflectionRoleId =
+      linkedTasks.find((row) => row?.roleId === 'radar-qa')?.roleId || createdTask.roleId;
+
+    const reflectionRes = await request(`/api/squad/role/${encodeURIComponent(reflectionRoleId)}/reflection`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({ reflection: 'smoke reflection' })
-    }
-    );
+    });
     if (reflectionRes.status !== 200) {
       throw new Error(`reflection expected 200, got ${reflectionRes.status}`);
     }

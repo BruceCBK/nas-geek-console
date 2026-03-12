@@ -1580,7 +1580,8 @@ function renderSquadTasks() {
     const badge = buildBadge(pickText(task.status, 'pending'));
 
     const detail = document.createElement('small');
-    detail.textContent = `ID ${pickText(task.id)} · 权重 ${formatNumber(task.weight)} · Δ ${Number(task.scoreDelta) > 0 ? '+' : ''}${formatNumber(task.scoreDelta)}`;
+    const relation = pickText(task.relationType, 'primary') === 'linked' ? '协同子任务' : '主任务';
+    detail.textContent = `ID ${pickText(task.id)} · ${relation} · 权重 ${formatNumber(task.weight)} · Δ ${Number(task.scoreDelta) > 0 ? '+' : ''}${formatNumber(task.scoreDelta)}`;
 
     const judge = document.createElement('small');
     judge.textContent = `完成度 ${formatNumber(task.completion)}｜质量 ${formatNumber(task.quality)}｜你 ${formatNumber(task.ownerScore)}｜队长 ${formatNumber(task.captainScore)}｜${task.passed ? '通过' : '待评/失败'}`;
@@ -1688,9 +1689,12 @@ async function createSquadTask() {
     await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
     const routedRole = pickText(payload.task?.roleName, payload.task?.roleId, '自动路由');
     const routedReason = pickText(payload.task?.assignmentReason);
+    const linkedTasks = toArray(payload.linkedTasks);
+    const linkedRoleNames = linkedTasks.map((row) => pickText(row.roleName)).filter(Boolean);
+    const linkedHint = linkedRoleNames.length ? `；已联动：${linkedRoleNames.join('、')}` : '';
     const resultText = routedReason
-      ? `已派发任务：${title} -> ${routedRole}（${routedReason}）`
-      : `已派发任务：${title} -> ${routedRole}`;
+      ? `已派发任务：${title} -> ${routedRole}（${routedReason}）${linkedHint}`
+      : `已派发任务：${title} -> ${routedRole}${linkedHint}`;
     setMessage(dom.squadMsg, resultText, 'success');
   });
 }
