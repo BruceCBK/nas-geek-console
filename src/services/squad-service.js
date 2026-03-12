@@ -35,6 +35,10 @@ const EXECUTOR_ROLE_PROGRESS_STEP = {
   'ops-tide': 13,
   'doc-pulse': 11
 };
+const REWARD_COMPLETION_THRESHOLD = 90;
+const REWARD_QUALITY_THRESHOLD = 90;
+const REWARD_STREAK_STEP = 3;
+const REWARD_MAX_BONUS = 5;
 
 const DEFAULT_ROLES = [
   {
@@ -220,6 +224,46 @@ function buildExecutorReviewPayload(task = {}) {
   };
 }
 
+function computeRewardDecision({ passed, completion, judgeQuality, blockedCount, streakBefore }) {
+  if (!passed) {
+    return {
+      bonus: 0,
+      nextStreak: 0,
+      reason: '任务未通过，奖励连胜清零'
+    };
+  }
+
+  const okCompletion = completion >= REWARD_COMPLETION_THRESHOLD;
+  const okQuality = judgeQuality >= REWARD_QUALITY_THRESHOLD;
+  const cleanRun = (Number(blockedCount) || 0) <= 0;
+
+  if (!okCompletion || !okQuality) {
+    return {
+      bonus: 0,
+      nextStreak: 0,
+      reason: '通过但未达高质量阈值，奖励连胜重置'
+    };
+  }
+
+  const nextStreak = Math.max(0, Number(streakBefore) || 0) + 1;
+  const tierBonus = 1 + Math.floor((nextStreak - 1) / REWARD_STREAK_STEP);
+  const cleanBonus = cleanRun ? 1 : 0;
+  const bonus = Math.min(REWARD_MAX_BONUS, tierBonus + cleanBonus);
+
+  const reasonParts = [
+    `高质量通过(完成度${Math.round(completion)} / 质量${Math.round(judgeQuality)})`,
+    `连胜${nextStreak}`,
+    `阶段奖励${tierBonus}`
+  ];
+  if (cleanBonus) reasonParts.push('无阻塞加成+1');
+
+  return {
+    bonus,
+    nextStreak,
+    reason: reasonParts.join('，')
+  };
+}
+
 function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], loadMap = new Map() }) {
   const policyRoles = toArray(COLLAB_POLICY[primaryRoleId]);
   const matchedSecondary = scoredRows
@@ -345,6 +389,8 @@ function buildTaskRow({
     blockedCount: 0,
     lastBlockedAt: '',
     blockedPenaltyApplied: false,
+    rewardBonus: 0,
+    rewardReason: '',
     completion: 0,
     quality: 0,
     ownerScore: 0,
@@ -372,6 +418,10 @@ function roleTemplate(base = {}) {
     failureEvents: 0,
     blockedPressure24h: 0,
     blockedPenaltyMultiplier: 1,
+    rewardStreak: 0,
+    bestRewardStreak: 0,
+    rewardPoints: 0,
+    lastRewardAt: '',
     avgCompletion: 0,
     avgQuality: 0,
     warningCount: 0,
@@ -421,6 +471,10 @@ class SquadService {
           failureEvents: Number(role?.failureEvents) || Number(role?.failedTasks) || 0,
           blockedPressure24h: Math.max(0, Number(role?.blockedPressure24h) || 0),
           blockedPenaltyMultiplier: Math.max(1, Number(role?.blockedPenaltyMultiplier) || 1),
+          rewardStreak: Math.max(0, Number(role?.rewardStreak) || 0),
+          bestRewardStreak: Math.max(0, Number(role?.bestRewardStreak) || 0),
+          rewardPoints: Math.max(0, Number(role?.rewardPoints) || 0),
+          lastRewardAt: pickText(role?.lastRewardAt),
           status
         };
       });
@@ -645,6 +699,9 @@ class SquadService {
           failureEvents: nextFailureEvents,
           blockedPressure24h: patch.recentBlockedCount,
           blockedPenaltyMultiplier: patch.multiplier,
+          rewardStreak: 0,
+          bestRewardStreak: Math.max(0, Number(role?.bestRewardStreak) || 0),
+          rewardPoints: Math.max(0, Number(role?.rewardPoints) || 0),
           warningCount: (Number(role?.warningCount) || 0) + (nextStatus === 'warning' ? 1 : 0),
           reflection: pickText(role?.reflection, '出现阻塞任务，需复盘根因并提交改进措施。'),
           updatedAt: nowIso()
@@ -904,16 +961,40 @@ class SquadService {
 
     const judgeQuality = avg([quality, ownerScore, captainScore]);
     const weight = clamp(updatedTask.weight, 1, 3);
-    let delta = ((completion - 75) * 0.08 + (judgeQuality - 75) * 0.12) * weight;
-    delta += passed ? 1 : -8 * weight;
-    delta = Math.round(clamp(delta, -24, 18));
+    const blockedCount = Math.max(0, Number(updatedTask.blockedCount) || 0);
 
+    let baseDelta = ((completion - 75) * 0.08 + (judgeQuality - 75) * 0.12) * weight;
+    baseDelta += passed ? 1 : -8 * weight;
+    baseDelta = Math.round(clamp(baseDelta, -24, 18));
+
+    const rewardDecision = computeRewardDecision({
+      passed,
+      completion,
+      judgeQuality,
+      blockedCount,
+      streakBefore: Number(role?.rewardStreak) || 0
+    });
+
+    const rewardBonus = Math.max(0, Number(rewardDecision.bonus) || 0);
+    const delta = Math.round(clamp(baseDelta + rewardBonus, -24, 24));
+
+    updatedTask.scoreDeltaBase = baseDelta;
+    updatedTask.rewardBonus = rewardBonus;
+    updatedTask.rewardReason = pickText(rewardDecision.reason);
     updatedTask.scoreDelta = delta;
 
     await this.taskStore.update((rows) => {
       const list = toArray(rows);
       const idx = list.findIndex((t) => t && t.id === updatedTask.id);
-      if (idx >= 0) list[idx] = { ...list[idx], scoreDelta: delta };
+      if (idx >= 0) {
+        list[idx] = {
+          ...list[idx],
+          scoreDeltaBase: baseDelta,
+          rewardBonus,
+          rewardReason: pickText(rewardDecision.reason),
+          scoreDelta: delta
+        };
+      }
       return list;
     });
 
@@ -921,8 +1002,13 @@ class SquadService {
     const doneTasks = roleTasks.filter((t) => t.status === 'completed');
     const failedTasks = roleTasks.filter((t) => t.status === 'failed');
     const blockedTasks = roleTasks.filter((t) => t.status === 'blocked');
+    const unresolvedFailures = failedTasks.length + blockedTasks.length;
     const score = clamp((Number(role.score) || BASE_SCORE) + delta, 0, MAX_SCORE);
-    const status = score < WARNING_SCORE ? 'warning' : 'active';
+    const status = score < WARNING_SCORE || unresolvedFailures > 0 ? 'warning' : 'active';
+
+    const nextRewardStreak = passed ? rewardDecision.nextStreak : 0;
+    const nextBestRewardStreak = Math.max(Number(role.bestRewardStreak) || 0, nextRewardStreak);
+    const nextRewardPoints = Math.max(0, Number(role.rewardPoints) || 0) + rewardBonus;
 
     const reflection =
       status === 'warning' && !pickText(role.reflection)
@@ -935,12 +1021,16 @@ class SquadService {
       status,
       totalTasks: roleTasks.length,
       doneTasks: doneTasks.length,
-      failedTasks: failedTasks.length + blockedTasks.length,
+      failedTasks: unresolvedFailures,
       failureEvents: Math.max(
         Number(role.failureEvents) || Number(role.failedTasks) || 0,
-        failedTasks.length + blockedTasks.length
+        unresolvedFailures
       ),
       blockedTasks: blockedTasks.length,
+      rewardStreak: nextRewardStreak,
+      bestRewardStreak: nextBestRewardStreak,
+      rewardPoints: nextRewardPoints,
+      lastRewardAt: rewardBonus > 0 ? nowIso() : pickText(role.lastRewardAt),
       avgCompletion: Math.round(avg(roleTasks.map((t) => Number(t.completion) || 0))),
       avgQuality: Math.round(avg(roleTasks.map((t) => Number(t.quality) || 0))),
       warningCount: (Number(role.warningCount) || 0) + (status === 'warning' ? 1 : 0),
@@ -961,12 +1051,27 @@ class SquadService {
       type: 'squad',
       target: role.id,
       status: passed ? 'success' : 'failed',
-      message: `${role.name} 任务评分更新：${delta >= 0 ? '+' : ''}${delta}（当前 ${score}）`,
-      meta: { taskId: updatedTask.id, score, delta }
+      message: `${role.name} 任务评分更新：${delta >= 0 ? '+' : ''}${delta}（基础 ${baseDelta >= 0 ? '+' : ''}${baseDelta}，奖励 +${rewardBonus}，当前 ${score}）`,
+      meta: {
+        taskId: updatedTask.id,
+        score,
+        delta,
+        baseDelta,
+        rewardBonus,
+        rewardReason: pickText(rewardDecision.reason),
+        rewardStreak: patchedRole.rewardStreak,
+        rewardPoints: patchedRole.rewardPoints
+      }
     });
 
     return {
-      task: { ...updatedTask, scoreDelta: delta },
+      task: {
+        ...updatedTask,
+        scoreDeltaBase: baseDelta,
+        rewardBonus,
+        rewardReason: pickText(rewardDecision.reason),
+        scoreDelta: delta
+      },
       role: patchedRole
     };
   }

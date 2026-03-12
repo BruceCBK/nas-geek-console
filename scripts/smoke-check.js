@@ -254,6 +254,13 @@ async function main() {
     if (reviewRes.status !== 200) {
       throw new Error(`review task expected 200, got ${reviewRes.status}`);
     }
+    const reviewPayload = getData(reviewRes.body) || {};
+    if (typeof reviewPayload?.task?.rewardBonus !== 'number') {
+      throw new Error('expected rewardBonus in review payload');
+    }
+    if (typeof reviewPayload?.role?.rewardPoints !== 'number') {
+      throw new Error('expected role.rewardPoints in review payload');
+    }
 
     const reflectionRoleId =
       linkedTasks.find((row) => row?.roleId === 'radar-qa')?.roleId || createdTask.roleId;

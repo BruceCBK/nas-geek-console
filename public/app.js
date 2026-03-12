@@ -1510,9 +1510,12 @@ function renderSquadRoles() {
 
     const pressureCount = Number(role.blockedPressure24h) || 0;
     const pressureMul = Number(role.blockedPenaltyMultiplier) || 1;
+    const rewardStreak = Number(role.rewardStreak) || 0;
+    const bestRewardStreak = Number(role.bestRewardStreak) || 0;
+    const rewardPoints = Number(role.rewardPoints) || 0;
 
     const meta = document.createElement('small');
-    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)} · 历史失败 ${formatNumber(role.failureEvents)} · 24h阻塞压力 ${formatNumber(pressureCount)} · 惩罚倍率 x${pressureMul.toFixed(2)}`;
+    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)} · 历史失败 ${formatNumber(role.failureEvents)} · 连胜 ${formatNumber(rewardStreak)}(最高${formatNumber(bestRewardStreak)}) · 奖励积分 ${formatNumber(rewardPoints)} · 24h阻塞压力 ${formatNumber(pressureCount)} · 惩罚倍率 x${pressureMul.toFixed(2)}`;
 
     const stat = document.createElement('small');
     stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
@@ -1626,6 +1629,13 @@ function renderSquadTasks() {
       const reason = document.createElement('small');
       reason.textContent = `路由依据：${task.assignmentReason}`;
       item.append(reason);
+    }
+
+    const rewardBonus = Number(task.rewardBonus) || 0;
+    if (rewardBonus > 0 || pickText(task.rewardReason)) {
+      const reward = document.createElement('small');
+      reward.textContent = `奖励 +${formatNumber(rewardBonus)}｜${pickText(task.rewardReason, '高质量执行奖励')}`;
+      item.append(reward);
     }
 
     const runtime = document.createElement('small');
