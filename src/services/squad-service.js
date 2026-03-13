@@ -1289,7 +1289,7 @@ class SquadService {
     }
 
     try {
-      await this._commandBridgeTick();
+      await this._commandBridgeTick({ forceBackfill: force });
     } catch (error) {
       this.commandBridgeLastError = pickText(error?.message, String(error));
       this.commandBridgeStats.failed += 1;
@@ -1377,39 +1377,69 @@ class SquadService {
     }
   }
 
-  async _commandBridgeTick() {
+  async _commandBridgeTick(options = {}) {
     if (!this.commandBridgeEnabled || this.commandBridgeTickRunning) return;
     this.commandBridgeTickRunning = true;
     this.commandBridgeLastTickAt = nowIso();
     this.commandBridgeStats.ticks += 1;
 
     try {
+      const forceBackfill = Boolean(options?.forceBackfill);
       const bridgeWindowMs = 48 * 60 * 60 * 1000;
       const nowMs = Date.now();
-      const longTasks = (await this._readLongTasks())
-        .filter((task) => {
-          const id = pickText(task?.id);
-          if (!id.startsWith('lt_')) return false;
-          const status = pickText(task?.status).toLowerCase();
-          if (status === 'running' || status === 'pending' || status === 'failed') return true;
-          const updatedMs = parseIsoMs(task?.updatedAt || task?.lastReportAt || task?.completedAt || task?.startedAt);
-          return updatedMs >= nowMs - bridgeWindowMs;
-        })
-        .slice()
-        .sort((a, b) => parseIsoMs(b?.updatedAt || b?.lastReportAt || b?.startedAt) - parseIsoMs(a?.updatedAt || a?.lastReportAt || a?.startedAt))
-        .slice(0, this.commandBridgeMaxTasks);
-
-      if (!longTasks.length) {
-        this.commandBridgeLastError = '';
-        return;
-      }
-
       let currentTasks = toArray(await this.taskStore.read());
       const bridgePrimaryBySource = new Map(
         currentTasks
           .filter((task) => pickText(task?.dispatchSource).toLowerCase() === 'user.command.bridge' && pickText(task?.relationType, 'primary').toLowerCase() === 'primary')
           .map((task) => [pickText(task?.sourceTaskId), task])
       );
+
+      const allLongTasks = (await this._readLongTasks())
+        .filter((task) => pickText(task?.id).startsWith('lt_'));
+
+      const candidateLongTasks = allLongTasks.filter((task) => {
+        const id = pickText(task?.id);
+        if (!id) return false;
+
+        if (forceBackfill) return true;
+
+        const status = pickText(task?.status).toLowerCase();
+        const isOpen = status === 'running' || status === 'pending' || status === 'failed';
+        if (isOpen) return true;
+
+        const updatedMs = parseIsoMs(task?.updatedAt || task?.lastReportAt || task?.completedAt || task?.startedAt);
+        const isRecent = updatedMs >= nowMs - bridgeWindowMs;
+        if (isRecent) return true;
+
+        return !bridgePrimaryBySource.has(id);
+      });
+
+      const unsyncedCount = candidateLongTasks.reduce((acc, task) => (
+        bridgePrimaryBySource.has(pickText(task?.id)) ? acc : acc + 1
+      ), 0);
+      const dynamicLimit = Math.min(
+        1000,
+        forceBackfill
+          ? Math.max(this.commandBridgeMaxTasks * 10, unsyncedCount, this.commandBridgeMaxTasks)
+          : Math.max(this.commandBridgeMaxTasks, unsyncedCount)
+      );
+
+      const longTasks = candidateLongTasks
+        .slice()
+        .sort((a, b) => {
+          const aId = pickText(a?.id);
+          const bId = pickText(b?.id);
+          const aSynced = bridgePrimaryBySource.has(aId) ? 1 : 0;
+          const bSynced = bridgePrimaryBySource.has(bId) ? 1 : 0;
+          if (aSynced !== bSynced) return aSynced - bSynced;
+          return parseIsoMs(b?.updatedAt || b?.lastReportAt || b?.startedAt) - parseIsoMs(a?.updatedAt || a?.lastReportAt || a?.startedAt);
+        })
+        .slice(0, dynamicLimit);
+
+      if (!longTasks.length) {
+        this.commandBridgeLastError = '';
+        return;
+      }
 
       let createdGroups = 0;
       for (const longTask of longTasks) {
@@ -1532,7 +1562,7 @@ class SquadService {
           meta: {
             createdGroups,
             touched,
-            candidateLongTasks: longTasks.length,
+            candidateLongTasks: candidateLongTasks.length,
             tickAt: nowText
           }
         });
