@@ -1702,7 +1702,11 @@ function renderSquadRoles() {
     const status = pickText(role.status, blockedCount > 0 || Number(role.score) < 60 ? 'warning' : 'active').toLowerCase();
     const badge = buildBadge(status);
 
-    line.append(title, badge);
+    const identity = document.createElement('div');
+    identity.className = 'role-identity';
+    identity.append(buildRoleAvatar(role, 'role-avatar'), title);
+
+    line.append(identity, badge);
     item.append(line);
 
     const chips = document.createElement('div');
@@ -1791,7 +1795,11 @@ function renderSquadLeaderboard() {
     const badge = buildBadge(Number(role.score) < 60 ? 'warning' : 'ok');
     badge.textContent = `${formatNumber(role.score)}分`;
 
-    line.append(title, badge);
+    const identity = document.createElement('div');
+    identity.className = 'role-identity';
+    identity.append(buildRoleAvatar(role, 'leader-avatar'), title);
+
+    line.append(identity, badge);
     item.append(line);
 
     const meta = document.createElement('small');
@@ -2329,6 +2337,37 @@ function textCell(text) {
   const el = document.createElement('span');
   el.textContent = pickText(text, '-');
   return el;
+}
+
+function buildRoleAvatar(role = {}, className = 'role-avatar') {
+  const avatar = document.createElement('img');
+  avatar.className = className;
+  avatar.alt = pickText(role.name, role.codename, 'role-avatar');
+  avatar.loading = 'lazy';
+  avatar.decoding = 'async';
+
+  const fallbackMap = {
+    'neon-scout': '🦐',
+    'code-claw': '🛠️',
+    'radar-qa': '🧪',
+    'ops-tide': '🛰️',
+    'doc-pulse': '📝'
+  };
+
+  const fallback = document.createElement('span');
+  fallback.className = `${className} avatar-fallback`;
+  fallback.textContent = fallbackMap[pickText(role.id)] || '🦞';
+
+  const src = pickText(role.avatar);
+  if (src) {
+    avatar.src = src;
+    avatar.addEventListener('error', () => {
+      avatar.replaceWith(fallback);
+    }, { once: true });
+    return avatar;
+  }
+
+  return fallback;
 }
 
 function buildBadge(statusInput) {

@@ -127,37 +127,45 @@ const DEFAULT_ROLES = [
     name: '霓虹侦察虾',
     codename: 'Neon Scout',
     specialty: '情报检索 / 事实交叉验证 / 线索收敛',
-    vibe: '快、准、冷静'
+    vibe: '快、准、冷静',
+    avatar: '/avatars/roles/neon-scout.svg'
   },
   {
     id: 'code-claw',
     name: '铁钳代码虾',
     codename: 'Code Claw',
     specialty: '功能开发 / 修复 / 重构',
-    vibe: '稳、狠、可维护'
+    vibe: '稳、狠、可维护',
+    avatar: '/avatars/roles/code-claw.svg'
   },
   {
     id: 'radar-qa',
     name: '雷达测试虾',
     codename: 'Radar QA',
     specialty: '回归测试 / 边界场景 / 质量门禁',
-    vibe: '严、细、可复现'
+    vibe: '严、细、可复现',
+    avatar: '/avatars/roles/radar-qa.svg'
   },
   {
     id: 'ops-tide',
     name: '黑潮运维虾',
     codename: 'Ops Tide',
     specialty: '服务巡检 / 性能诊断 / 稳定性保障',
-    vibe: '警觉、务实、抗压'
+    vibe: '警觉、务实、抗压',
+    avatar: '/avatars/roles/ops-tide.svg'
   },
   {
     id: 'doc-pulse',
     name: '脉冲文档虾',
     codename: 'Doc Pulse',
     specialty: '文档沉淀 / 方案说明 / 变更记录',
-    vibe: '清晰、结构化、可追溯'
+    vibe: '清晰、结构化、可追溯',
+    avatar: '/avatars/roles/doc-pulse.svg'
   }
 ];
+
+const DEFAULT_ROLE_BY_ID = new Map(DEFAULT_ROLES.map((role) => [pickText(role.id), role]));
+
 
 function clamp(value, min, max) {
   const n = Number(value);
@@ -631,6 +639,7 @@ function roleTemplate(base = {}) {
     codename: pickText(base.codename),
     specialty: pickText(base.specialty),
     vibe: pickText(base.vibe),
+    avatar: pickText(base.avatar),
     score: BASE_SCORE,
     status: 'active',
     totalTasks: 0,
@@ -1151,6 +1160,8 @@ class SquadService {
   async _normalizeRoleScores() {
     await this.roleStore.update((rows) => {
       return toArray(rows).map((role) => {
+        const roleId = pickText(role?.id);
+        const defaultRole = DEFAULT_ROLE_BY_ID.get(roleId) || {};
         const score = clamp(role?.score, 0, MAX_SCORE);
         const status = score < WARNING_SCORE ? 'warning' : 'active';
         let capabilitySeed = numberOr(role?.capabilityIndex, score || 100);
@@ -1160,6 +1171,11 @@ class SquadService {
 
         return {
           ...role,
+          name: pickText(role?.name, defaultRole?.name),
+          codename: pickText(role?.codename, defaultRole?.codename),
+          specialty: pickText(role?.specialty, defaultRole?.specialty),
+          vibe: pickText(role?.vibe, defaultRole?.vibe),
+          avatar: pickText(role?.avatar, defaultRole?.avatar),
           score,
           dispatchDoctrine: pickText(role?.dispatchDoctrine, CAPTAIN_DISPATCH_DOCTRINE),
           failureEvents: Number(role?.failureEvents) || Number(role?.failedTasks) || 0,

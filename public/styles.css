@@ -831,7 +831,7 @@ textarea::placeholder {
   padding-right: 4px;
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(2, minmax(250px, 1fr));
+  grid-template-columns: 1fr;
 }
 
 .squad-role-board .board-meta {
@@ -913,4 +913,35 @@ textarea::placeholder {
   .squad-role-board {
     grid-template-columns: 1fr;
   }
+}
+
+
+.role-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.role-avatar,
+.leader-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid rgba(120, 224, 255, 0.4);
+  background: rgba(8, 28, 44, 0.85);
+  object-fit: cover;
+  padding: 4px;
+}
+
+.leader-avatar {
+  width: 28px;
+  height: 28px;
+}
+
+.avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
 }
