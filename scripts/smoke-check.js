@@ -211,6 +211,21 @@ async function main() {
     }
   });
 
+  await check('POST /api/squad/command-bridge/sync', async () => {
+    const res = await request('/api/squad/command-bridge/sync', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ source: 'smoke.manual-sync' })
+    });
+    if (res.status !== 200) {
+      throw new Error(`expected 200, got ${res.status}`);
+    }
+    const data = getData(res.body);
+    if (typeof data?.enabled !== 'boolean') {
+      throw new Error('expected command bridge enabled flag');
+    }
+  });
+
   await check('POST /api/squad/reporting/sync-memory dryRun', async () => {
     const res = await request('/api/squad/reporting/sync-memory', {
       method: 'POST',

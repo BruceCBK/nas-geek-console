@@ -66,6 +66,7 @@ const dom = {
   squadRoleBoard: document.getElementById('squadRoleBoard'),
   squadLeaderboard: document.getElementById('squadLeaderboard'),
   squadTaskBoard: document.getElementById('squadTaskBoard'),
+  squadTaskSyncNowBtn: document.getElementById('squadTaskSyncNowBtn'),
   squadTaskPageSizeSelect: document.getElementById('squadTaskPageSizeSelect'),
   squadTaskPrevBtn: document.getElementById('squadTaskPrevBtn'),
   squadTaskNextBtn: document.getElementById('squadTaskNextBtn'),
@@ -295,6 +296,9 @@ function wireEvents() {
   });
   dom.squadSyncMemoryBtn?.addEventListener('click', () => {
     syncSquadReportingMemory().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+  });
+  dom.squadTaskSyncNowBtn?.addEventListener('click', () => {
+    syncSquadTaskBoardNow().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
   });
   dom.squadTaskPageSizeSelect?.addEventListener('change', () => {
     state.squad.pager.pageSize = Math.max(5, Number(dom.squadTaskPageSizeSelect?.value || 25));
@@ -2111,6 +2115,25 @@ async function syncSquadReportingMemory() {
     }
 
     setMessage(dom.squadMsg, `记忆已同步：${dailyPath}（写入 ${wroteDaily} 行，阻塞 ${wroteBlocked} 条）${archiveText}`, 'success');
+  });
+}
+
+async function syncSquadTaskBoardNow() {
+  await withButtons([dom.squadTaskSyncNowBtn], async () => {
+    setMessage(dom.squadMsg, '正在同步任务大厅...', 'info', 0);
+    const payload = await apiJson('/api/squad/command-bridge/sync', {
+      method: 'POST',
+      body: {
+        source: 'ui.task-board-sync'
+      }
+    });
+
+    await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
+    setMessage(
+      dom.squadMsg,
+      `任务大厅已同步：最近同步 ${formatTime(payload?.lastSyncAt)}，累计拆分 ${formatNumber(payload?.stats?.createdGroups)} 组`,
+      'success'
+    );
   });
 }
 

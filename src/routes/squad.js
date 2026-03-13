@@ -79,6 +79,16 @@ function createSquadRouter({ squadService }) {
   );
 
   router.post(
+    '/command-bridge/sync',
+    asyncHandler(async (req, res) => {
+      const payload = await squadService.syncCommandBridgeNow({
+        source: req.body?.source
+      });
+      return sendSuccess(res, payload, { legacy: payload });
+    })
+  );
+
+  router.post(
     '/reporting/sync-memory',
     asyncHandler(async (req, res) => {
       const payload = await squadService.syncReportingMemory({

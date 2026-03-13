@@ -75,6 +75,7 @@ const requiredIds = [
   'squadRoleBoard',
   'squadLeaderboard',
   'squadTaskBoard',
+  'squadTaskSyncNowBtn',
   'squadTaskPageSizeSelect',
   'squadTaskPrevBtn',
   'squadTaskNextBtn',

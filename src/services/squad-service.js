@@ -1271,13 +1271,13 @@ class SquadService {
     };
   }
 
-  async _syncCommandBridgeOnDemand() {
+  async _syncCommandBridgeOnDemand(force = false) {
     if (!this.commandBridgeEnabled) return;
     if (this.commandBridgeTickRunning) return;
 
     const now = Date.now();
     const lastMs = Math.max(parseIsoMs(this.commandBridgeLastSyncAt), parseIsoMs(this.commandBridgeLastTickAt), 0);
-    if (lastMs > 0 && now - lastMs < this.commandBridgeTickMs) {
+    if (!force && lastMs > 0 && now - lastMs < this.commandBridgeTickMs) {
       return;
     }
 
@@ -1287,6 +1287,25 @@ class SquadService {
       this.commandBridgeLastError = pickText(error?.message, String(error));
       this.commandBridgeStats.failed += 1;
     }
+  }
+
+  async syncCommandBridgeNow(options = {}) {
+    await this._syncCommandBridgeOnDemand(true);
+
+    const source = pickText(options?.source, 'manual.button');
+    await this.logService.append({
+      action: 'squad.command_bridge.manual_sync',
+      type: 'squad',
+      target: 'command-bridge',
+      status: 'success',
+      message: `手动触发桥接同步：${source}`,
+      meta: {
+        source,
+        bridge: this._buildCommandBridgeMeta()
+      }
+    });
+
+    return this._buildCommandBridgeMeta();
   }
 
   _startCommandBridgeLoop() {
