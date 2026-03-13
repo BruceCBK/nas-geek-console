@@ -207,6 +207,44 @@ function parseClawhubList(text) {
   return rows;
 }
 
+function parseSkillVersionFromMarkdown(markdown) {
+  const raw = String(markdown || '');
+  if (!raw.trim()) return '';
+
+  const frontMatterMatch = raw.match(/^---\s*[\r\n]+([\s\S]*?)\r?\n---/);
+  const inspectScope = frontMatterMatch ? frontMatterMatch[1] : raw.slice(0, 320);
+  const versionMatch = inspectScope.match(/^\s*version\s*:\s*([^\n#]+?)\s*$/im);
+  if (!versionMatch) return '';
+
+  return String(versionMatch[1] || '').trim().replace(/^['"]|['"]$/g, '');
+}
+
+async function listLocalSkillRows() {
+  try {
+    const entries = await fs.readdir(SKILLS_LOCAL_DIR, { withFileTypes: true });
+    const rows = [];
+
+    for (const entry of entries) {
+      if (!entry || !entry.isDirectory?.()) continue;
+      const slug = sanitizeSkillSlug(entry.name);
+      if (!slug) continue;
+
+      const skillMd = path.join(SKILLS_LOCAL_DIR, entry.name, 'SKILL.md');
+      try {
+        const raw = await fs.readFile(skillMd, 'utf8');
+        const version = parseSkillVersionFromMarkdown(raw);
+        rows.push({ slug, version: version || 'local' });
+      } catch {
+        // ignore folders without readable SKILL.md
+      }
+    }
+
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
 
 function parseJsonObject(textInput, fallback = {}) {
   const text = String(textInput || '').trim();
@@ -796,8 +834,34 @@ class OpenClawService {
 
   async listSkillsRaw() {
     const out = await this.runBin(CLAWHUB_BIN, ['list'], 120000);
+    const cliRows = parseClawhubList(out.stdout);
+    const localRows = await listLocalSkillRows();
+
+    const merged = new Map();
+    cliRows.forEach((row) => {
+      const slug = sanitizeSkillSlug(row?.slug);
+      if (!slug) return;
+      merged.set(slug, {
+        slug,
+        version: String(row?.version || '').trim() || '-'
+      });
+    });
+
+    localRows.forEach((row) => {
+      const slug = sanitizeSkillSlug(row?.slug);
+      if (!slug) return;
+      if (!merged.has(slug)) {
+        merged.set(slug, {
+          slug,
+          version: String(row?.version || '').trim() || 'local'
+        });
+      }
+    });
+
+    const rows = Array.from(merged.values()).sort((a, b) => a.slug.localeCompare(b.slug));
+
     return {
-      rows: parseClawhubList(out.stdout),
+      rows,
       raw: out.stdout || out.stderr || ''
     };
   }
