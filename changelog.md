@@ -15,7 +15,7 @@
 - **后端能力**：新增 `GET /api/openclaw/model-options` 与 `POST /api/openclaw/model/switch`，切换时自动同步 `agents.defaults.model.primary` + `agents.defaults.thinkingDefault`，并自动重载 OpenClaw Gateway。
 - **安全与回滚**：切换前支持 dryRun 校验；重载失败时自动回滚到切换前配置备份。
 - **验证增强**：UI 合约与 smoke 新增模型切换接口校验；已完成多轮真实切换回归（5.3↔5.4、5.3↔5.2）并恢复默认。
-- Commit: `fcf6fba`
+- Commit: `9fc4c5d`
 
 ## 3.0.1 - 2026-03-13
 - **修复/运维增强**：新增 push fallback 脚本，HTTPS push 失败时自动切换 `ssh.github.com:443` 重试，并在失败后恢复原 push URL。
