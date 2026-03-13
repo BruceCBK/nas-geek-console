@@ -271,8 +271,11 @@ async function main() {
     if (!createdTask?.assignmentReason) {
       throw new Error('missing assignmentReason in squad task payload');
     }
-    if (!linkedTasks.some((row) => row?.roleId === 'radar-qa')) {
-      throw new Error('expected linked collaboration task for radar-qa');
+    if (!Array.isArray(linkedTasks) || linkedTasks.length < 1) {
+      throw new Error('expected at least one linked collaboration task');
+    }
+    if (linkedTasks.length > 2) {
+      throw new Error(`expected linked collaboration tasks <= 2, got ${linkedTasks.length}`);
     }
     if (createdTask?.status !== 'running') {
       throw new Error(`expected created task status=running, got ${createdTask?.status || '-'}`);

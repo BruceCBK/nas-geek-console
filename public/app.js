@@ -1867,6 +1867,12 @@ function renderSquadTasks() {
       item.append(roster);
     }
 
+    if (Number(task.parallelRoleCount) > 0) {
+      const plan = document.createElement('small');
+      plan.textContent = `并行规模：${formatNumber(task.parallelRoleCount)} 角色（性能限流：最多 3）`;
+      item.append(plan);
+    }
+
     if (pickText(task.description)) {
       const desc = document.createElement('small');
       desc.textContent = task.description;

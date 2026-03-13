@@ -90,9 +90,11 @@ const SQUAD_STATE_TASK_MAX = Math.max(
   Number.parseInt(process.env.SQUAD_STATE_TASK_MAX || '240', 10) || 240
 );
 
+const SQUAD_PARALLEL_MIN_ROLES = 2;
+const SQUAD_PARALLEL_MAX_ROLES = 3;
 const SQUAD_COLLAB_MAX_LINKED = Math.max(
   1,
-  Number.parseInt(process.env.SQUAD_COLLAB_MAX_LINKED || '4', 10) || 4
+  Number.parseInt(process.env.SQUAD_COLLAB_MAX_LINKED || String(SQUAD_PARALLEL_MAX_ROLES - 1), 10) || (SQUAD_PARALLEL_MAX_ROLES - 1)
 );
 
 const DEFAULT_ROLES = [
@@ -398,6 +400,31 @@ function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], lo
     .map((role) => role.id);
 }
 
+function decideParallelRoleCount({ title = '', description = '', weight = 1 } = {}) {
+  const merged = `${pickText(title)} ${pickText(description)}`.toLowerCase();
+  const highComplexity = /(汇报|新闻|分析|排查|重构|联调|验收|优化|协作|复杂|investigate|analysis|refactor|regression|report|brief)/u.test(merged);
+  const base = clamp((Number(weight) || 1) + 1, SQUAD_PARALLEL_MIN_ROLES, SQUAD_PARALLEL_MAX_ROLES);
+  if (highComplexity) return SQUAD_PARALLEL_MAX_ROLES;
+  return base;
+}
+
+function buildParallelRoleIds({ primaryRoleId, preferredRoleIds = [], allRoles = [], targetTotalRoles = SQUAD_PARALLEL_MIN_ROLES }) {
+  const maxRoles = clamp(targetTotalRoles, SQUAD_PARALLEL_MIN_ROLES, SQUAD_PARALLEL_MAX_ROLES);
+  const targetLinked = Math.max(1, maxRoles - 1);
+  const fallback = toArray(allRoles)
+    .map((row) => row?.id)
+    .filter((id) => pickText(id) && id !== primaryRoleId);
+  const linkedRoleIds = Array.from(new Set([...toArray(preferredRoleIds), ...fallback]))
+    .filter((id) => id !== primaryRoleId)
+    .slice(0, Math.min(SQUAD_COLLAB_MAX_LINKED, targetLinked));
+
+  return {
+    targetTotalRoles: maxRoles,
+    linkedRoleIds,
+    parallelRoleIds: [primaryRoleId, ...linkedRoleIds]
+  };
+}
+
 function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title, description }) {
   const roleRows = toArray(roles);
   if (!roleRows.length) {
@@ -489,7 +516,10 @@ function buildTaskRow({
   parentTaskId,
   relationType = 'primary',
   dispatchSource = 'user.primary',
-  sourceTaskId = ''
+  sourceTaskId = '',
+  parallelRoleIds = [],
+  parallelRoleCount = 0,
+  coordinationMode = 'parallel'
 }) {
   const ts = nowIso();
   return {
@@ -505,6 +535,9 @@ function buildTaskRow({
     relationType,
     dispatchSource: pickText(dispatchSource, relationType === 'linked' ? 'derived.linked' : 'user.primary'),
     sourceTaskId: pickText(sourceTaskId, parentTaskId),
+    parallelRoleIds: Array.from(new Set(toArray(parallelRoleIds).map((id) => pickText(id)).filter(Boolean))),
+    parallelRoleCount: Math.max(1, Number(parallelRoleCount) || toArray(parallelRoleIds).length || 1),
+    coordinationMode: pickText(coordinationMode, 'parallel'),
     weight,
     status: 'running',
     progressPercent: 5,
@@ -1489,7 +1522,10 @@ class SquadService {
           sourceLabel: taskSourceLabel(task),
           sourceTaskId,
           roleAction: taskRoleAction(task),
-          collaborationRoster: pickText(groupRosterMap.get(pickText(task?.taskGroupId)))
+          collaborationRoster: pickText(groupRosterMap.get(pickText(task?.taskGroupId))),
+          parallelRoleCount: Math.max(1, Number(task?.parallelRoleCount) || toArray(task?.parallelRoleIds).length || 1),
+          parallelRoleIds: Array.from(new Set(toArray(task?.parallelRoleIds).map((id) => pickText(id)).filter(Boolean))),
+          coordinationMode: pickText(task?.coordinationMode, 'parallel')
         };
       });
 
@@ -1674,19 +1710,30 @@ class SquadService {
     const role = assignment.role;
 
     const taskGroupId = crypto.randomUUID();
+    const targetParallelRoles = decideParallelRoleCount({ title, description, weight });
+    const parallelPlan = buildParallelRoleIds({
+      primaryRoleId: role.id,
+      preferredRoleIds: assignment.collaborationRoleIds,
+      allRoles: roleRows,
+      targetTotalRoles: targetParallelRoles
+    });
+
     const task = buildTaskRow({
       title,
       description,
       role,
       weight,
       assignmentMode: assignment.assignmentMode,
-      assignmentReason: `${assignment.assignmentReason} ｜ ${CAPTAIN_DISPATCH_DOCTRINE}`,
+      assignmentReason: `${assignment.assignmentReason} ｜ 并行协作=${parallelPlan.parallelRoleIds.length}角色 ｜ ${CAPTAIN_DISPATCH_DOCTRINE}`,
       taskGroupId,
       relationType: 'primary',
-      dispatchSource: source
+      dispatchSource: source,
+      parallelRoleIds: parallelPlan.parallelRoleIds,
+      parallelRoleCount: parallelPlan.parallelRoleIds.length,
+      coordinationMode: 'parallel'
     });
 
-    const linkedTasks = assignment.collaborationRoleIds
+    const linkedTasks = parallelPlan.linkedRoleIds
       .map((roleId) => roleRows.find((r) => r.id === roleId))
       .filter(Boolean)
       .map((linkedRole) => {
@@ -1705,7 +1752,10 @@ class SquadService {
           parentTaskId: task.id,
           relationType: 'linked',
           dispatchSource: source.includes('system.smoke') ? 'system.smoke.linked' : 'derived.linked',
-          sourceTaskId: task.id
+          sourceTaskId: task.id,
+          parallelRoleIds: parallelPlan.parallelRoleIds,
+          parallelRoleCount: parallelPlan.parallelRoleIds.length,
+          coordinationMode: 'parallel'
         });
       });
 
