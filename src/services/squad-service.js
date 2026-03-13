@@ -75,6 +75,11 @@ const SQUAD_MEMORY_AUTO_SYNC_MS = Math.max(
 );
 const SQUAD_BLOCKED_ARCHIVE_DIR = path.join(MEMORY_DIR, 'cards', 'squad-blocked');
 
+const SQUAD_STATE_TASK_MAX = Math.max(
+  60,
+  Number.parseInt(process.env.SQUAD_STATE_TASK_MAX || '240', 10) || 240
+);
+
 const DEFAULT_ROLES = [
   {
     id: 'neon-scout',
@@ -530,6 +535,16 @@ function roleTemplate(base = {}) {
 function parseIsoMs(input) {
   const ms = Date.parse(pickText(input));
   return Number.isFinite(ms) ? ms : 0;
+}
+
+function taskRecencyMs(task = {}) {
+  return Math.max(
+    parseIsoMs(task?.lastHeartbeatAt),
+    parseIsoMs(task?.startedAt),
+    parseIsoMs(task?.createdAt),
+    parseIsoMs(task?.gradedAt),
+    0
+  );
 }
 
 function toCstDateKey(now = new Date()) {
@@ -1331,9 +1346,14 @@ class SquadService {
       causeLabels
     });
 
+    const boardTasks = taskRows
+      .slice()
+      .sort((a, b) => taskRecencyMs(b) - taskRecencyMs(a))
+      .slice(0, SQUAD_STATE_TASK_MAX);
+
     return {
       roles: sortedRoles,
-      tasks: taskRows.slice(0, 40),
+      tasks: boardTasks,
       summary,
       executor,
       causeLabels,

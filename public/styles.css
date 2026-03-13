@@ -793,3 +793,29 @@ textarea::placeholder {
 .warning-text {
   color: #ffd0a8;
 }
+
+
+#squadTaskBoardControls {
+  gap: 8px;
+  align-items: center;
+}
+
+#squadTaskBoardControls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+#squadTaskPageInfo {
+  display: inline-block;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+}
+
+.squad-task-scroll {
+  max-height: 68vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}

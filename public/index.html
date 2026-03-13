@@ -205,8 +205,24 @@
           </section>
 
           <section class="card glow-card lift-card ripple-surface" data-tilt>
-            <h3>任务大厅</h3>
-            <div id="squadTaskBoard" class="list-block"></div>
+            <div class="header-row">
+              <h3>任务大厅</h3>
+              <div class="actions" id="squadTaskBoardControls">
+                <label>
+                  每页
+                  <select id="squadTaskPageSizeSelect">
+                    <option value="25" selected>25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                  条
+                </label>
+                <button id="squadTaskPrevBtn">上一页</button>
+                <button id="squadTaskNextBtn">下一页</button>
+              </div>
+            </div>
+            <small id="squadTaskPageInfo">第 1 / 1 页</small>
+            <div id="squadTaskBoard" class="list-block squad-task-scroll"></div>
           </section>
 
           <section class="three-col">

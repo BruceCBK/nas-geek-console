@@ -2,6 +2,8 @@ const WECHAT_RECO_LIMIT = 10;
 const WECHAT_DEFAULT_QUERY = '实用软件 免费工具 效率工具 工具测评';
 const DASHBOARD_AUTO_MIN_MS = 5000;
 const DASHBOARD_AUTO_MAX_MS = 2 * 60 * 1000;
+const SQUAD_AUTO_REFRESH_MS = 15000;
+const SQUAD_AUTO_MAX_FAIL = 6;
 
 const dom = {
   loginOverlay: document.getElementById('loginOverlay'),
@@ -64,6 +66,10 @@ const dom = {
   squadRoleBoard: document.getElementById('squadRoleBoard'),
   squadLeaderboard: document.getElementById('squadLeaderboard'),
   squadTaskBoard: document.getElementById('squadTaskBoard'),
+  squadTaskPageSizeSelect: document.getElementById('squadTaskPageSizeSelect'),
+  squadTaskPrevBtn: document.getElementById('squadTaskPrevBtn'),
+  squadTaskNextBtn: document.getElementById('squadTaskNextBtn'),
+  squadTaskPageInfo: document.getElementById('squadTaskPageInfo'),
   squadTaskTitleInput: document.getElementById('squadTaskTitleInput'),
   squadTaskDescInput: document.getElementById('squadTaskDescInput'),
   squadTaskRoleSelect: document.getElementById('squadTaskRoleSelect'),
@@ -121,7 +127,21 @@ const state = {
     executor: {},
     causeLabels: {},
     reporting: {},
-    memorySync: {}
+    memorySync: {},
+    pager: {
+      page: 1,
+      pageSize: 25,
+      totalPages: 1,
+      totalItems: 0
+    },
+    auto: {
+      enabled: true,
+      intervalMs: 15000,
+      timer: 0,
+      inFlight: false,
+      failCount: 0,
+      nextAt: 0
+    }
   },
 
   trendingData: null,
@@ -270,10 +290,26 @@ function wireEvents() {
   });
 
   dom.squadRefreshBtn?.addEventListener('click', () => {
-    loadSquadState().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+    loadSquadState({ source: 'manual' }).catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
   });
   dom.squadSyncMemoryBtn?.addEventListener('click', () => {
     syncSquadReportingMemory().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+  });
+  dom.squadTaskPageSizeSelect?.addEventListener('change', () => {
+    state.squad.pager.pageSize = Math.max(5, Number(dom.squadTaskPageSizeSelect?.value || 25));
+    state.squad.pager.page = 1;
+    renderSquadTasks();
+  });
+  dom.squadTaskPrevBtn?.addEventListener('click', () => {
+    const page = Math.max(1, Number(state.squad.pager.page || 1) - 1);
+    state.squad.pager.page = page;
+    renderSquadTasks();
+  });
+  dom.squadTaskNextBtn?.addEventListener('click', () => {
+    const total = Math.max(1, Number(state.squad.pager.totalPages || 1));
+    const page = Math.min(total, Number(state.squad.pager.page || 1) + 1);
+    state.squad.pager.page = page;
+    renderSquadTasks();
   });
   dom.squadCreateTaskBtn?.addEventListener('click', () => {
     createSquadTask().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
@@ -311,6 +347,7 @@ async function verifySessionAndLoad() {
   if (!state.token) {
     setAuthenticated(false);
     clearDashboardAutoTimer();
+    clearSquadAutoTimer();
     renderDashboardAutoRefreshHint();
     return;
   }
@@ -320,10 +357,12 @@ async function verifySessionAndLoad() {
     setAuthenticated(true);
     await loadInitialData();
     scheduleDashboardAutoRefresh('session-ready');
+    scheduleSquadAutoRefresh('session-ready');
   } catch {
     clearToken();
     setAuthenticated(false);
     clearDashboardAutoTimer();
+    clearSquadAutoTimer();
     renderDashboardAutoRefreshHint();
   }
 }
@@ -355,6 +394,7 @@ async function login() {
     await loadInitialData();
     state.dashboardAuto.failCount = 0;
     scheduleDashboardAutoRefresh('login');
+    scheduleSquadAutoRefresh('login');
   });
 }
 
@@ -364,6 +404,7 @@ async function logout() {
   state.token = '';
   setAuthenticated(false);
   clearDashboardAutoTimer();
+  clearSquadAutoTimer();
   renderDashboardAutoRefreshHint();
   if (!current) return;
 
@@ -385,6 +426,7 @@ function setAuthenticated(authed) {
 
   if (!isAuthed) {
     clearDashboardAutoTimer();
+    clearSquadAutoTimer();
   }
 
   renderDashboardAutoRefreshHint();
@@ -401,6 +443,10 @@ function setActiveView(viewId) {
   });
 
   requestAnimationFrame(() => bindInteractiveSurfaces(document));
+  if (viewId === 'squadView' && state.token) {
+    loadSquadState({ source: 'view', keepPage: true }).catch(() => {});
+  }
+  scheduleSquadAutoRefresh('view-change');
 }
 
 function setActiveTab(tab) {
@@ -529,6 +575,51 @@ async function runDashboardAutoRefreshTick() {
   } finally {
     auto.inFlight = false;
     scheduleDashboardAutoRefresh('tick');
+  }
+}
+
+function clearSquadAutoTimer() {
+  const auto = state.squad.auto;
+  if (!auto?.timer) return;
+  clearTimeout(auto.timer);
+  auto.timer = 0;
+  auto.nextAt = 0;
+}
+
+function scheduleSquadAutoRefresh(reason = 'default') {
+  const auto = state.squad.auto;
+  clearSquadAutoTimer();
+
+  if (!state.token || !auto.enabled || state.activeView !== 'squadView') {
+    return;
+  }
+
+  const base = Math.max(6000, Number(auto.intervalMs) || SQUAD_AUTO_REFRESH_MS);
+  const backoff = Math.min(120000, base * 2 ** Math.min(3, Number(auto.failCount) || 0));
+  const delay = reason === 'manual' ? base : backoff;
+  auto.nextAt = Date.now() + delay;
+  auto.timer = setTimeout(() => {
+    runSquadAutoRefreshTick().catch(() => {});
+  }, delay);
+}
+
+async function runSquadAutoRefreshTick() {
+  const auto = state.squad.auto;
+  auto.timer = 0;
+
+  if (!state.token || !auto.enabled || auto.inFlight || state.activeView !== 'squadView') {
+    return;
+  }
+
+  auto.inFlight = true;
+  try {
+    await loadSquadState({ source: 'auto' });
+    auto.failCount = 0;
+  } catch {
+    auto.failCount = Math.min(SQUAD_AUTO_MAX_FAIL, Number(auto.failCount || 0) + 1);
+  } finally {
+    auto.inFlight = false;
+    scheduleSquadAutoRefresh('tick');
   }
 }
 
@@ -1465,18 +1556,45 @@ function renderTopics() {
 }
 
 
-async function loadSquadState() {
+async function loadSquadState(options = {}) {
+  const source = pickText(options?.source, 'manual');
+  const keepPage = options?.keepPage === true;
   const payload = await apiJson('/api/squad/state');
+
+  const nextTasks = toArray(payload.tasks);
+  const sortedTasks = nextTasks
+    .slice()
+    .sort((a, b) => Math.max(Date.parse(pickText(b?.lastHeartbeatAt, b?.createdAt)) || 0, 0) - Math.max(Date.parse(pickText(a?.lastHeartbeatAt, a?.createdAt)) || 0, 0));
+
+  const prevPager = asObject(state.squad.pager);
+  const pageSize = Math.max(5, Number(prevPager.pageSize || dom.squadTaskPageSizeSelect?.value || 25));
+  const totalPages = Math.max(1, Math.ceil(sortedTasks.length / pageSize));
+  const nextPage = keepPage ? Math.min(Math.max(1, Number(prevPager.page || 1)), totalPages) : 1;
+
   state.squad = {
     roles: toArray(payload.roles),
-    tasks: toArray(payload.tasks),
+    tasks: sortedTasks,
     summary: asObject(payload.summary),
     warningRoles: toArray(payload.warningRoles),
     executor: asObject(payload.executor),
     causeLabels: asObject(payload.causeLabels),
     reporting: asObject(payload.reporting),
-    memorySync: asObject(payload.memorySync)
+    memorySync: asObject(payload.memorySync),
+    pager: {
+      page: nextPage,
+      pageSize,
+      totalPages,
+      totalItems: sortedTasks.length
+    },
+    auto: {
+      ...asObject(state.squad.auto)
+    }
   };
+
+  if (dom.squadTaskPageSizeSelect) {
+    dom.squadTaskPageSizeSelect.value = String(pageSize);
+  }
+
   renderSquadState();
 }
 
@@ -1653,12 +1771,38 @@ function renderSquadTasks() {
 
   const tasks = toArray(state.squad.tasks);
   const causeLabels = state.squad.causeLabels || {};
+
+  const pager = asObject(state.squad.pager);
+  const pageSize = Math.max(5, Number(pager.pageSize || dom.squadTaskPageSizeSelect?.value || 25));
+  const totalItems = tasks.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const page = Math.min(Math.max(1, Number(pager.page || 1)), totalPages);
+  const start = (page - 1) * pageSize;
+  const pageTasks = tasks.slice(start, start + pageSize);
+
+  state.squad.pager = {
+    ...pager,
+    page,
+    pageSize,
+    totalPages,
+    totalItems
+  };
+
+  if (dom.squadTaskPageInfo) {
+    dom.squadTaskPageInfo.textContent = `第 ${page} / ${totalPages} 页 · 共 ${totalItems} 条任务`;
+  }
+  if (dom.squadTaskPrevBtn) dom.squadTaskPrevBtn.disabled = page <= 1;
+  if (dom.squadTaskNextBtn) dom.squadTaskNextBtn.disabled = page >= totalPages;
+  if (dom.squadTaskPageSizeSelect) {
+    dom.squadTaskPageSizeSelect.value = String(pageSize);
+  }
+
   if (!tasks.length) {
     dom.squadTaskBoard.appendChild(buildEmpty('暂无任务，先创建一条吧'));
     return;
   }
 
-  tasks.slice(0, 25).forEach((task) => {
+  pageTasks.forEach((task) => {
     const item = document.createElement('div');
     item.className = 'list-item ripple-surface';
 
@@ -1829,7 +1973,7 @@ async function syncSquadReportingMemory() {
       }
     });
 
-    await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+    await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
 
     const dedup = payload?.dedupHit === true;
     const dailyPath = pickText(payload?.dailyMemoryPath, '-');
@@ -1874,7 +2018,7 @@ async function createSquadTask() {
     if (dom.squadTaskDescInput) dom.squadTaskDescInput.value = '';
     if (dom.squadReviewTaskIdInput) dom.squadReviewTaskIdInput.value = pickText(payload.task?.id);
 
-    await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+    await Promise.allSettled([loadSquadState({ keepPage: false }), loadDashboardSummary()]);
     const routedRole = pickText(payload.task?.roleName, payload.task?.roleId, '自动路由');
     const routedReason = pickText(payload.task?.assignmentReason);
     const linkedTasks = toArray(payload.linkedTasks);
@@ -1913,7 +2057,7 @@ async function reportSquadTaskHeartbeat(task) {
     body: { progressPercent, note }
   });
 
-  await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+  await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
   setMessage(dom.squadMsg, `已上报心跳：${pickText(task.title)} -> ${formatNumber(progressPercent)}%`, 'success');
 }
 
@@ -1945,7 +2089,7 @@ async function submitSquadReview() {
       }
     });
 
-    await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+    await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
     const roleName = pickText(payload.role?.name, payload.role?.codename, '角色');
     setMessage(dom.squadMsg, `评分完成：${roleName} 当前 ${formatNumber(payload.role?.score)} 分`, 'success');
   });
@@ -1972,7 +2116,7 @@ async function submitSquadReflection() {
     });
 
     if (dom.squadReflectionText) dom.squadReflectionText.value = '';
-    await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+    await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
     setMessage(dom.squadMsg, '已提交自省，积分模型已更新', 'success');
   });
 }

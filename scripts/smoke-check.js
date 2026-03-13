@@ -277,6 +277,16 @@ async function main() {
       throw new Error(`expected created task status=running, got ${createdTask?.status || '-'}`);
     }
 
+    const afterCreateStateRes = await request('/api/squad/state', { headers: authHeaders() });
+    if (afterCreateStateRes.status !== 200) {
+      throw new Error(`state after create expected 200, got ${afterCreateStateRes.status}`);
+    }
+    const afterCreateState = getData(afterCreateStateRes.body) || {};
+    const listedTaskIds = Array.isArray(afterCreateState?.tasks) ? afterCreateState.tasks.map((row) => row?.id) : [];
+    if (!listedTaskIds.includes(taskId)) {
+      throw new Error('expected newly created task to appear in squad task board payload');
+    }
+
     const heartbeatRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/heartbeat`, {
       method: 'POST',
       headers: authHeaders(),
