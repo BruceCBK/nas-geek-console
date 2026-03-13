@@ -945,3 +945,10 @@ textarea::placeholder {
   justify-content: center;
   font-size: 15px;
 }
+
+.hint {
+  color: var(--text-muted);
+  display: block;
+  margin: 6px 0 10px;
+  font-size: 12px;
+}

@@ -93,6 +93,27 @@ const GATEWAY_STATE_PRESETS = {
   }
 };
 
+
+const MODEL_SWITCH_OPTIONS = [
+  {
+    id: 'gmn/gpt-5.4',
+    label: 'gmn/gpt-5.4',
+    thinkingDefault: 'xhigh'
+  },
+  {
+    id: 'gmn/gpt-5.3-codex',
+    label: 'gmn/gpt-5.3-codex',
+    thinkingDefault: 'xhigh'
+  },
+  {
+    id: 'gmn/gpt-5.2-codex',
+    label: 'gmn/gpt-5.2-codex',
+    thinkingDefault: 'high'
+  }
+];
+
+const MODEL_SWITCH_MAP = new Map(MODEL_SWITCH_OPTIONS.map((row) => [row.id, row]));
+
 function nowStamp() {
   const d = new Date();
   return d.toISOString().replace(/[:.]/g, '-');
@@ -406,6 +427,39 @@ async function findSkillRoots(rootDir, maxDepth = 4, depth = 0) {
   return rows;
 }
 
+
+function normalizeModelPrimary(input) {
+  return String(input || '').trim();
+}
+
+function splitModelPrimary(modelPrimary) {
+  const text = normalizeModelPrimary(modelPrimary);
+  const idx = text.indexOf('/');
+  if (idx <= 0 || idx >= text.length - 1) {
+    return { provider: '', modelId: '' };
+  }
+  return {
+    provider: text.slice(0, idx),
+    modelId: text.slice(idx + 1)
+  };
+}
+
+function findProviderModel(config = {}, modelPrimary = '') {
+  const pair = splitModelPrimary(modelPrimary);
+  if (!pair.provider || !pair.modelId) return null;
+
+  const provider = config?.models?.providers?.[pair.provider];
+  const modelRows = Array.isArray(provider?.models) ? provider.models : [];
+  const model = modelRows.find((row) => String(row?.id || '').trim() === pair.modelId) || null;
+
+  if (!provider || !model) return null;
+  return {
+    provider: pair.provider,
+    modelId: pair.modelId,
+    model
+  };
+}
+
 class OpenClawService {
   async runBinCapture(bin, args = [], timeout = 120000) {
     try {
@@ -563,6 +617,105 @@ class OpenClawService {
     }
 
     return patches;
+  }
+
+
+  listModelSwitchOptions() {
+    return MODEL_SWITCH_OPTIONS.map((row) => ({ ...row }));
+  }
+
+  buildModelSwitchPlan(config = {}, modelPrimaryInput = '') {
+    const modelPrimary = normalizeModelPrimary(modelPrimaryInput);
+    if (!modelPrimary) {
+      throw new HttpError(400, 'INVALID_MODEL_PRIMARY', 'modelPrimary is required');
+    }
+
+    const profile = MODEL_SWITCH_MAP.get(modelPrimary);
+    if (!profile) {
+      throw new HttpError(
+        400,
+        'UNSUPPORTED_MODEL_PRIMARY',
+        `unsupported modelPrimary: ${modelPrimary}`
+      );
+    }
+
+    const providerModel = findProviderModel(config, modelPrimary);
+    if (!providerModel) {
+      throw new HttpError(
+        400,
+        'MODEL_NOT_FOUND_IN_PROVIDER',
+        `model not found in providers config: ${modelPrimary}`
+      );
+    }
+
+    const previousPrimary = normalizeModelPrimary(getByPath(config, 'agents.defaults.model.primary'));
+    const previousThinking = normalizeModelPrimary(getByPath(config, 'agents.defaults.thinkingDefault'));
+
+    const nextConfig = JSON.parse(JSON.stringify(config || {}));
+    nextConfig.agents = nextConfig.agents || {};
+    nextConfig.agents.defaults = nextConfig.agents.defaults || {};
+    nextConfig.agents.defaults.model = nextConfig.agents.defaults.model || {};
+    nextConfig.agents.defaults.model.primary = modelPrimary;
+    nextConfig.agents.defaults.thinkingDefault = profile.thinkingDefault;
+
+    return {
+      profile,
+      previous: {
+        modelPrimary: previousPrimary || '',
+        thinkingDefault: previousThinking || ''
+      },
+      next: {
+        modelPrimary,
+        thinkingDefault: profile.thinkingDefault
+      },
+      touchedPaths: ['agents.defaults.model.primary', 'agents.defaults.thinkingDefault'],
+      config: nextConfig
+    };
+  }
+
+  async switchModelPrimaryProfile(modelPrimaryInput, options = {}) {
+    const dryRun = Boolean(options?.dryRun);
+    const reload = options?.reload !== false;
+
+    const loaded = await this.loadConfigJson();
+    const plan = this.buildModelSwitchPlan(loaded.config, modelPrimaryInput);
+
+    if (dryRun) {
+      return {
+        dryRun: true,
+        ...plan,
+        availableModels: this.listModelSwitchOptions()
+      };
+    }
+
+    const { backupPath } = await this.saveConfigJson(plan.config);
+    let reloadText = 'skipped';
+
+    if (reload) {
+      const out = await this.runBinCapture(OPENCLAW_BIN, ['gateway', 'restart'], 180000);
+      if (!out.ok) {
+        try {
+          await fs.copyFile(backupPath, OPENCLAW_CONFIG);
+        } catch {
+          // ignore rollback copy error
+        }
+        throw new HttpError(
+          500,
+          'MODEL_SWITCH_RELOAD_FAILED',
+          out.stderr || out.stdout || out.message || 'gateway restart failed'
+        );
+      }
+      reloadText = `${out.stdout}${out.stderr}`.trim() || 'gateway restarted';
+    }
+
+    return {
+      dryRun: false,
+      backupPath,
+      reload,
+      reloadText,
+      ...plan,
+      availableModels: this.listModelSwitchOptions()
+    };
   }
 
   async getStatus() {
@@ -818,13 +971,13 @@ class OpenClawService {
     }
 
     const { config } = await this.loadConfigJson();
-    config.agents = config.agents || {};
-    config.agents.defaults = config.agents.defaults || {};
-    config.agents.defaults.model = config.agents.defaults.model || {};
-    config.agents.defaults.model.primary = modelPrimary;
-
-    const { backupPath } = await this.saveConfigJson(config);
-    return { backupPath, modelPrimary };
+    const plan = this.buildModelSwitchPlan(config, modelPrimary);
+    const { backupPath } = await this.saveConfigJson(plan.config);
+    return {
+      backupPath,
+      modelPrimary: plan.next.modelPrimary,
+      thinkingDefault: plan.next.thinkingDefault
+    };
   }
 
   async restartGateway() {

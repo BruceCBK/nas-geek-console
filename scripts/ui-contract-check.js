@@ -32,6 +32,8 @@ const requiredIds = [
   'dashboardAutoRefreshInterval',
   'dashboardAutoRefreshHint',
   'healthCard',
+  'modelSwitchSelect',
+  'modelSwitchApplyBtn',
   'modelSummaryCard',
   'skillsSummaryCard',
   'gatewaySummaryCard',

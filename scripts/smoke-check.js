@@ -129,6 +129,35 @@ async function main() {
     }
   });
 
+  await check('GET /api/openclaw/model-options', async () => {
+    const res = await request('/api/openclaw/model-options', { headers: authHeaders() });
+    if (res.status !== 200) {
+      throw new Error(`expected 200, got ${res.status}`);
+    }
+    const data = getData(res.body);
+    if (!Array.isArray(data?.options) || data.options.length < 3) {
+      throw new Error('expected model options >= 3');
+    }
+  });
+
+  await check('POST /api/openclaw/model/switch dryRun', async () => {
+    const res = await request('/api/openclaw/model/switch', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ modelPrimary: 'gmn/gpt-5.3-codex', dryRun: true })
+    });
+    if (res.status !== 200) {
+      throw new Error(`expected 200, got ${res.status}`);
+    }
+    const data = getData(res.body);
+    if (!data?.dryRun || data?.next?.modelPrimary !== 'gmn/gpt-5.3-codex') {
+      throw new Error('expected dryRun switch plan for gmn/gpt-5.3-codex');
+    }
+    if (data?.next?.thinkingDefault !== 'xhigh') {
+      throw new Error(`expected thinkingDefault xhigh, got ${data?.next?.thinkingDefault || '-'}`);
+    }
+  });
+
   await check('GET /api/skills/search-links?q=weather', async () => {
     const res = await request('/api/skills/search-links?q=weather', { headers: authHeaders() });
     if (res.status !== 200) {

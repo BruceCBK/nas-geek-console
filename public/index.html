@@ -79,6 +79,15 @@
           <section class="cards-grid monitor-grid">
             <article class="card glow-card lift-card ripple-surface" data-tilt>
               <h4>模型与运行时</h4>
+              <div class="row">
+                <select id="modelSwitchSelect" aria-label="模型切换">
+                  <option value="gmn/gpt-5.4">gmn/gpt-5.4</option>
+                  <option value="gmn/gpt-5.3-codex" selected>gmn/gpt-5.3-codex</option>
+                  <option value="gmn/gpt-5.2-codex">gmn/gpt-5.2-codex</option>
+                </select>
+                <button id="modelSwitchApplyBtn">切换模型并生效</button>
+              </div>
+              <small class="hint">切换后将自动更新 openclaw.json 相关配置并重载网关</small>
               <div id="modelSummaryCard" class="kv-list"></div>
             </article>
             <article class="card glow-card lift-card ripple-surface" data-tilt>

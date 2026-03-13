@@ -24,6 +24,8 @@ const dom = {
   dashboardAutoRefreshInterval: document.getElementById('dashboardAutoRefreshInterval'),
   dashboardAutoRefreshHint: document.getElementById('dashboardAutoRefreshHint'),
   healthCard: document.getElementById('healthCard'),
+  modelSwitchSelect: document.getElementById('modelSwitchSelect'),
+  modelSwitchApplyBtn: document.getElementById('modelSwitchApplyBtn'),
   modelSummaryCard: document.getElementById('modelSummaryCard'),
   skillsSummaryCard: document.getElementById('skillsSummaryCard'),
   gatewaySummaryCard: document.getElementById('gatewaySummaryCard'),
@@ -100,6 +102,10 @@ const state = {
     inFlight: false,
     failCount: 0,
     nextAt: 0
+  },
+  modelSwitch: {
+    options: [],
+    current: ''
   },
   serviceVisualState: '',
 
@@ -230,6 +236,10 @@ function wireEvents() {
     state.dashboardAuto.baseMs = parseAutoRefreshBaseMs(dom.dashboardAutoRefreshInterval?.value);
     renderDashboardAutoRefreshHint();
     scheduleDashboardAutoRefresh('interval');
+  });
+
+  dom.modelSwitchApplyBtn?.addEventListener('click', () => {
+    switchModelAndReload().catch((err) => setMessage(dom.dashboardMsg, err.message, 'error'));
   });
 
   dom.quickServiceStatusBtn?.addEventListener('click', () => {
@@ -446,6 +456,7 @@ function setActiveTab(tab) {
 async function loadInitialData() {
   await Promise.allSettled([
     loadDashboardSummary(),
+    loadModelSwitchOptions(),
     loadSkills(),
     loadSkillSearchLinks(),
     loadSquadState(),
@@ -666,8 +677,12 @@ function renderDashboardMonitor(payload = {}) {
 
   const gatewayLabel = pickText(gateway.stateLabel, '状态暂不可用（等待网关遥测）');
 
+  const modelPrimary = pickText(modelSummary.modelPrimary, '-');
+  syncModelSwitchSelection(modelPrimary);
+
   renderKeyValue(dom.modelSummaryCard, {
-    模型: pickText(modelSummary.modelPrimary, '-'),
+    模型: modelPrimary,
+    思维强度: pickText(modelSummary.thinkingDefault, '-'),
     配置: modelSummary.hasConfig ? '已加载' : '未加载',
     控制台运行: pickText(runtime.appUptimeText, health.runtimeText, humanizeRuntimeZh(health.uptimeSec)),
     进程PID: pickText(health.pid, '-')
@@ -757,6 +772,100 @@ function normalizeDashboardLogs(logs) {
     message: pickText(row?.message, '-'),
     createdAt: pickText(row?.createdAt)
   }));
+}
+
+async function loadModelSwitchOptions() {
+  try {
+    const payload = await apiJson('/api/openclaw/model-options');
+    const options = toArray(payload.options).map((row) => ({
+      id: pickText(row?.id),
+      label: pickText(row?.label, row?.id)
+    })).filter((row) => row.id);
+
+    if (options.length) {
+      state.modelSwitch.options = options;
+      const current = pickText(payload.currentModelPrimary);
+      state.modelSwitch.current = current;
+      if (dom.modelSwitchSelect) {
+        dom.modelSwitchSelect.innerHTML = '';
+        options.forEach((row) => {
+          const option = document.createElement('option');
+          option.value = row.id;
+          option.textContent = row.label;
+          dom.modelSwitchSelect.appendChild(option);
+        });
+      }
+      syncModelSwitchSelection(current);
+      return;
+    }
+  } catch {
+    // noop: fall back to static options in HTML
+  }
+
+  state.modelSwitch.options = toArray(dom.modelSwitchSelect?.options).map((opt) => ({
+    id: pickText(opt?.value),
+    label: pickText(opt?.textContent, opt?.value)
+  })).filter((row) => row.id);
+}
+
+function syncModelSwitchSelection(modelPrimaryInput) {
+  const modelPrimary = pickText(modelPrimaryInput);
+  if (!modelPrimary || !dom.modelSwitchSelect) return;
+
+  const hasOption = Array.from(dom.modelSwitchSelect.options || []).some((opt) => pickText(opt.value) === modelPrimary);
+  if (hasOption) {
+    dom.modelSwitchSelect.value = modelPrimary;
+  }
+  state.modelSwitch.current = modelPrimary;
+}
+
+async function switchModelAndReload() {
+  const modelPrimary = pickText(dom.modelSwitchSelect?.value);
+  if (!modelPrimary) {
+    throw new Error('请选择目标模型');
+  }
+
+  const current = pickText(state.modelSwitch.current, state.dashboard?.modelSummary?.modelPrimary);
+  if (current && current === modelPrimary) {
+    setMessage(dom.dashboardMsg, `模型已是 ${modelPrimary}，无需切换`, 'info');
+    return;
+  }
+
+  if (!window.confirm(`确认切换模型到 ${modelPrimary}？系统将自动更新配置并重载网关。`)) {
+    return;
+  }
+
+  if (dom.modelSwitchSelect) dom.modelSwitchSelect.disabled = true;
+  try {
+    await withButtons([dom.modelSwitchApplyBtn], async () => {
+      setMessage(dom.dashboardMsg, `正在校验并切换到 ${modelPrimary}...`, 'info', 0);
+
+      await apiJson('/api/openclaw/model/switch', {
+        method: 'POST',
+        body: {
+          modelPrimary,
+          dryRun: true
+        }
+      });
+
+      const payload = await apiJson('/api/openclaw/model/switch', {
+        method: 'POST',
+        body: {
+          modelPrimary
+        }
+      });
+
+      await sleep(2000);
+      await Promise.allSettled([loadModelSwitchOptions(), loadDashboardSummary(), fetchOpenClawServiceStatus()]);
+      setMessage(
+        dom.dashboardMsg,
+        `模型已切换：${pickText(payload?.next?.modelPrimary, modelPrimary)}（thinking=${pickText(payload?.next?.thinkingDefault, '-')})`,
+        'success'
+      );
+    });
+  } finally {
+    if (dom.modelSwitchSelect) dom.modelSwitchSelect.disabled = false;
+  }
 }
 
 async function fetchOpenClawServiceStatus() {

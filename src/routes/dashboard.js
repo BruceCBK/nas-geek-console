@@ -355,6 +355,7 @@ function createDashboardRouter({ authService, openclawService, taskService, logS
 
       const modelSummary = {
         modelPrimary: pickText(configResult?.modelPrimary) || '-',
+        thinkingDefault: pickText(configResult?.config?.agents?.defaults?.thinkingDefault, '-'),
         hasConfig: Boolean(configResult?.config && typeof configResult.config === 'object')
       };
 

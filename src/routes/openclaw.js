@@ -125,6 +125,96 @@ function createOpenClawRouter({ openclawService, taskService, logService }) {
     })
   );
 
+  router.get(
+    '/model-options',
+    asyncHandler(async (_req, res) => {
+      const payload = await openclawService.loadConfigJson();
+      const options = openclawService.listModelSwitchOptions();
+      return sendSuccess(
+        res,
+        {
+          currentModelPrimary: pickText(payload?.modelPrimary),
+          currentThinkingDefault: pickText(payload?.config?.agents?.defaults?.thinkingDefault),
+          options
+        },
+        {
+          legacy: {
+            currentModelPrimary: pickText(payload?.modelPrimary),
+            currentThinkingDefault: pickText(payload?.config?.agents?.defaults?.thinkingDefault),
+            options
+          }
+        }
+      );
+    })
+  );
+
+  router.post(
+    '/model/switch',
+    asyncHandler(async (req, res) => {
+      const modelPrimary = pickText(req.body?.modelPrimary);
+      const dryRun = String(req.body?.dryRun || '').toLowerCase() === 'true' || req.body?.dryRun === true;
+
+      if (dryRun) {
+        const payload = await openclawService.switchModelPrimaryProfile(modelPrimary, {
+          dryRun: true,
+          reload: false
+        });
+        return sendSuccess(res, payload, { legacy: payload });
+      }
+
+      const output = await taskService.runTask({
+        type: 'openclaw.model.switch',
+        target: modelPrimary,
+        message: `Switch model to ${modelPrimary}`,
+        action: async () => {
+          const result = await openclawService.switchModelPrimaryProfile(modelPrimary, {
+            dryRun: false,
+            reload: true
+          });
+          return {
+            payload: result,
+            message: shrink(
+              pickText(
+                result?.reloadText,
+                `model switched to ${result?.next?.modelPrimary || modelPrimary}`
+              ),
+              220
+            )
+          };
+        }
+      });
+
+      const payload = output.result?.payload || {};
+      await logService.append({
+        action: 'openclaw.model.switch',
+        type: 'openclaw',
+        target: pickText(payload?.next?.modelPrimary, modelPrimary),
+        status: 'success',
+        message: `模型切换完成：${pickText(payload?.next?.modelPrimary, modelPrimary)}（thinking=${pickText(payload?.next?.thinkingDefault, '-')})`,
+        meta: {
+          backupPath: payload?.backupPath,
+          touchedPaths: payload?.touchedPaths,
+          previous: payload?.previous,
+          next: payload?.next
+        }
+      });
+
+      return sendSuccess(
+        res,
+        {
+          task: output.task,
+          ...payload
+        },
+        {
+          legacy: {
+            task: output.task,
+            ...payload
+          }
+        }
+      );
+    })
+  );
+
   router.post(
     '/model-primary',
     asyncHandler(async (req, res) => {
