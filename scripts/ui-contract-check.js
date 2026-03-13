@@ -71,6 +71,7 @@ const requiredIds = [
 
   // lobster squad
   'squadRefreshBtn',
+  'squadSyncMemoryBtn',
   'squadRoleBoard',
   'squadLeaderboard',
   'squadTaskBoard',

@@ -197,6 +197,12 @@ async function main() {
     if (!Array.isArray(data?.reporting?.memoryTips)) {
       throw new Error('expected squad reporting memoryTips array');
     }
+    if (!data?.memorySync || typeof data.memorySync !== 'object') {
+      throw new Error('expected squad memorySync metadata');
+    }
+    if (typeof data?.memorySync?.enabled !== 'boolean') {
+      throw new Error('expected squad memorySync enabled flag');
+    }
   });
 
   await check('POST /api/squad/reporting/sync-memory dryRun', async () => {
@@ -214,6 +220,21 @@ async function main() {
     }
     if (!data?.reporting || typeof data.reporting.liveBrief !== 'string') {
       throw new Error('expected reporting snapshot in sync-memory response');
+    }
+  });
+
+  await check('POST /api/squad/reporting/sync-memory dedup on unchanged state', async () => {
+    const res = await request('/api/squad/reporting/sync-memory', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ source: 'smoke', dryRun: true, force: false, maxItems: 4 })
+    });
+    if (res.status !== 200) {
+      throw new Error(`expected 200, got ${res.status}`);
+    }
+    const data = getData(res.body);
+    if (data?.dedupHit !== true) {
+      throw new Error('expected dedupHit=true on unchanged sync-memory run');
     }
   });
 

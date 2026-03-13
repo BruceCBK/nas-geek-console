@@ -64,13 +64,14 @@ const SQUAD_REPORT_CACHE_MS = Math.max(
   Number.parseInt(process.env.SQUAD_REPORT_CACHE_MS || '12000', 10) || 12000
 );
 
-const SQUAD_MEMORY_SYNC_DEDUP_MS = Math.max(
-  60 * 1000,
-  Number.parseInt(process.env.SQUAD_MEMORY_SYNC_DEDUP_MS || String(10 * 60 * 1000), 10) || 10 * 60 * 1000
-);
 const SQUAD_MEMORY_SYNC_MAX_ITEMS = Math.max(
   2,
   Number.parseInt(process.env.SQUAD_MEMORY_SYNC_MAX_ITEMS || '6', 10) || 6
+);
+const SQUAD_MEMORY_AUTO_SYNC_ENABLED = String(process.env.SQUAD_MEMORY_AUTO_SYNC_ENABLED || 'true').toLowerCase() !== 'false';
+const SQUAD_MEMORY_AUTO_SYNC_MS = Math.max(
+  60 * 1000,
+  Number.parseInt(process.env.SQUAD_MEMORY_AUTO_SYNC_MS || String(5 * 60 * 1000), 10) || 5 * 60 * 1000
 );
 const SQUAD_BLOCKED_ARCHIVE_DIR = path.join(MEMORY_DIR, 'cards', 'squad-blocked');
 
@@ -759,6 +760,21 @@ class SquadService {
       atMs: 0,
       fingerprint: ''
     };
+    this.memorySyncInFlight = false;
+    this.memoryAutoSyncEnabled = SQUAD_MEMORY_AUTO_SYNC_ENABLED;
+    this.memoryAutoSyncMs = SQUAD_MEMORY_AUTO_SYNC_MS;
+    this.memoryAutoSyncTimer = null;
+    this.memoryAutoSyncLastTickAt = '';
+    this.memoryAutoSyncLastSyncAt = '';
+    this.memoryAutoSyncLastSource = '';
+    this.memoryAutoSyncLastResult = '';
+    this.memoryAutoSyncLastError = '';
+    this.memoryAutoSyncStats = {
+      ticks: 0,
+      synced: 0,
+      skipped: 0,
+      failed: 0
+    };
   }
 
   _invalidateReportingCache() {
@@ -813,6 +829,7 @@ class SquadService {
     await this._normalizeRoleScores();
     await this._normalizeTaskRuntime();
     this._startExecutorLoop();
+    this._startMemorySyncLoop();
   }
 
   async _normalizeRoleScores() {
@@ -851,6 +868,63 @@ class SquadService {
 
     const seeded = DEFAULT_ROLES.map((row) => roleTemplate(row));
     await this.roleStore.write(seeded);
+  }
+
+  _buildMemorySyncMeta() {
+    return {
+      enabled: this.memoryAutoSyncEnabled,
+      intervalMs: this.memoryAutoSyncMs,
+      lastTickAt: this.memoryAutoSyncLastTickAt,
+      lastSyncAt: this.memoryAutoSyncLastSyncAt,
+      lastSource: this.memoryAutoSyncLastSource,
+      lastResult: this.memoryAutoSyncLastResult,
+      lastError: this.memoryAutoSyncLastError,
+      lastFingerprint: pickText(this.memorySyncCache?.fingerprint).slice(0, 12),
+      stats: { ...this.memoryAutoSyncStats }
+    };
+  }
+
+  _startMemorySyncLoop() {
+    if (!this.memoryAutoSyncEnabled || this.memoryAutoSyncTimer) return;
+
+    this.memoryAutoSyncTimer = setInterval(() => {
+      this._memorySyncAutoTick().catch((error) => {
+        this.memoryAutoSyncLastError = pickText(error?.message, String(error));
+        this.memoryAutoSyncStats.failed += 1;
+      });
+    }, this.memoryAutoSyncMs);
+
+    if (typeof this.memoryAutoSyncTimer.unref === 'function') {
+      this.memoryAutoSyncTimer.unref();
+    }
+  }
+
+  async _memorySyncAutoTick() {
+    this.memoryAutoSyncLastTickAt = nowIso();
+    this.memoryAutoSyncStats.ticks += 1;
+
+    try {
+      const result = await this.syncReportingMemory({
+        source: 'auto.loop',
+        force: false,
+        dryRun: false,
+        maxItems: SQUAD_MEMORY_SYNC_MAX_ITEMS,
+        suppressLog: true
+      });
+      this.memoryAutoSyncLastSyncAt = pickText(result?.syncedAt, nowIso());
+      this.memoryAutoSyncLastSource = pickText(result?.source, 'auto.loop');
+      this.memoryAutoSyncLastResult = result?.dedupHit ? 'skipped' : 'synced';
+      this.memoryAutoSyncLastError = '';
+      if (result?.dedupHit) {
+        this.memoryAutoSyncStats.skipped += 1;
+      } else {
+        this.memoryAutoSyncStats.synced += 1;
+      }
+    } catch (error) {
+      this.memoryAutoSyncLastError = pickText(error?.message, String(error));
+      this.memoryAutoSyncLastResult = 'failed';
+      this.memoryAutoSyncStats.failed += 1;
+    }
   }
 
   _startExecutorLoop() {
@@ -1264,6 +1338,7 @@ class SquadService {
       executor,
       causeLabels,
       reporting,
+      memorySync: this._buildMemorySyncMeta(),
       captainDirective: CAPTAIN_DISPATCH_DOCTRINE,
       warningRoles: warningRoles.map((row) => ({
         id: row.id,
@@ -1278,29 +1353,52 @@ class SquadService {
     const source = pickText(options?.source, 'manual');
     const force = options?.force === true;
     const dryRun = options?.dryRun === true;
+    const suppressLog = options?.suppressLog === true;
     const maxItems = clamp(options?.maxItems ?? options?.limit ?? SQUAD_MEMORY_SYNC_MAX_ITEMS, 2, 12);
 
-    const state = await this.getState();
-    const reporting = normalizeReportingPayload(state?.reporting || {});
-    const blockedTasks = toArray(state?.tasks)
-      .filter((task) => pickText(task?.status).toLowerCase() === 'blocked')
-      .slice(0, maxItems);
+    if (this.memorySyncInFlight && source.startsWith('auto.')) {
+      return {
+        syncedAt: nowIso(),
+        source,
+        dryRun,
+        dedupHit: true,
+        force,
+        fingerprint: pickText(this.memorySyncCache?.fingerprint).slice(0, 12),
+        reporting: {
+          engine: '',
+          generatedAt: '',
+          liveBrief: '',
+          alerts: [],
+          memoryTips: []
+        },
+        dailyMemoryPath: '',
+        blockedArchivePath: '',
+        wrote: {
+          daily: 0,
+          blocked: 0
+        }
+      };
+    }
 
-    const fingerprint = makeMemorySyncFingerprint({ reporting, blockedTasks });
-    const nowMs = Date.now();
-    const dedupHit =
-      !force &&
-      this.memorySyncCache?.fingerprint === fingerprint &&
-      nowMs - Number(this.memorySyncCache?.atMs || 0) <= SQUAD_MEMORY_SYNC_DEDUP_MS;
+    this.memorySyncInFlight = true;
 
-    const now = new Date();
-    const dayKey = toCstDateKey(now);
-    const nowText = nowIso();
-    const dailyPath = path.join(MEMORY_DIR, `${dayKey}.md`);
-    const blockedArchivePath = path.join(SQUAD_BLOCKED_ARCHIVE_DIR, `${dayKey}.md`);
+    try {
+      const state = await this.getState();
+      const reporting = normalizeReportingPayload(state?.reporting || {});
+      const blockedTasks = toArray(state?.tasks)
+        .filter((task) => pickText(task?.status).toLowerCase() === 'blocked')
+        .slice(0, maxItems);
 
-    const dailySection = buildDailyMemorySection({
-      reporting: {
+      const fingerprint = makeMemorySyncFingerprint({ reporting, blockedTasks });
+      const dedupHit = !force && this.memorySyncCache?.fingerprint === fingerprint;
+
+      const now = new Date();
+      const dayKey = toCstDateKey(now);
+      const nowText = nowIso();
+      const dailyPath = path.join(MEMORY_DIR, `${dayKey}.md`);
+      const blockedArchivePath = path.join(SQUAD_BLOCKED_ARCHIVE_DIR, `${dayKey}.md`);
+
+      const clippedReporting = {
         ...reporting,
         alerts: toArray(reporting?.alerts).slice(0, maxItems),
         memoryTips: toArray(reporting?.memoryTips).slice(0, maxItems),
@@ -1308,74 +1406,89 @@ class SquadService {
           dailyBullets: toArray(reporting?.memoryDigest?.dailyBullets).slice(0, maxItems),
           blockedBullets: toArray(reporting?.memoryDigest?.blockedBullets).slice(0, Math.max(1, Math.floor(maxItems / 2)))
         }
-      },
-      blockedTasks,
-      nowText,
-      source
-    });
-    const blockedSection = buildBlockedArchiveSection({
-      blockedTasks,
-      causeLabels: state?.causeLabels,
-      nowText
-    });
-
-    if (!dedupHit && !dryRun) {
-      await fs.mkdir(MEMORY_DIR, { recursive: true });
-      await fs.appendFile(dailyPath, dailySection, 'utf8');
-
-      if (blockedSection) {
-        await fs.mkdir(path.dirname(blockedArchivePath), { recursive: true });
-        await fs.appendFile(blockedArchivePath, blockedSection, 'utf8');
-      }
-    }
-
-    if (!dedupHit) {
-      this.memorySyncCache = {
-        atMs: nowMs,
-        fingerprint
       };
-    }
 
-    await this.logService.append({
-      action: 'squad.reporting.sync_memory',
-      type: 'squad',
-      target: source,
-      status: dedupHit ? 'skipped' : 'success',
-      message: dedupHit
-        ? `记忆同步去重命中（${formatCstClock(now)}）`
-        : `记忆同步完成（${formatCstClock(now)}）`,
-      meta: {
+      const dailySection = buildDailyMemorySection({
+        reporting: clippedReporting,
+        blockedTasks,
+        nowText,
+        source
+      });
+      const blockedSection = buildBlockedArchiveSection({
+        blockedTasks,
+        causeLabels: state?.causeLabels,
+        nowText
+      });
+
+      if (!dedupHit && !dryRun) {
+        await fs.mkdir(MEMORY_DIR, { recursive: true });
+        await fs.appendFile(dailyPath, dailySection, 'utf8');
+
+        if (blockedSection) {
+          await fs.mkdir(path.dirname(blockedArchivePath), { recursive: true });
+          await fs.appendFile(blockedArchivePath, blockedSection, 'utf8');
+        }
+      }
+
+      if (!dedupHit) {
+        this.memorySyncCache = {
+          atMs: Date.now(),
+          fingerprint
+        };
+      }
+
+      const result = {
+        syncedAt: nowText,
         source,
         dryRun,
         dedupHit,
         force,
         fingerprint: fingerprint.slice(0, 12),
-        blockedCount: blockedTasks.length,
-        engine: reporting?.engine
-      }
-    });
+        reporting: {
+          engine: clippedReporting?.engine,
+          generatedAt: clippedReporting?.generatedAt,
+          liveBrief: clippedReporting?.liveBrief,
+          alerts: toArray(clippedReporting?.alerts),
+          memoryTips: toArray(clippedReporting?.memoryTips)
+        },
+        dailyMemoryPath: `${dayKey}.md`,
+        blockedArchivePath: blockedSection ? toRelativeMemoryPath(blockedArchivePath) : '',
+        wrote: {
+          daily: dedupHit || dryRun ? 0 : dailySection.split('\n').filter(Boolean).length,
+          blocked: dedupHit || dryRun || !blockedSection ? 0 : blockedTasks.length
+        }
+      };
 
-    return {
-      syncedAt: nowText,
-      source,
-      dryRun,
-      dedupHit,
-      force,
-      fingerprint: fingerprint.slice(0, 12),
-      reporting: {
-        engine: reporting?.engine,
-        generatedAt: reporting?.generatedAt,
-        liveBrief: reporting?.liveBrief,
-        alerts: toArray(reporting?.alerts).slice(0, maxItems),
-        memoryTips: toArray(reporting?.memoryTips).slice(0, maxItems)
-      },
-      dailyMemoryPath: `${dayKey}.md`,
-      blockedArchivePath: blockedSection ? toRelativeMemoryPath(blockedArchivePath) : '',
-      wrote: {
-        daily: dedupHit || dryRun ? 0 : dailySection.split('\n').filter(Boolean).length,
-        blocked: dedupHit || dryRun || !blockedSection ? 0 : blockedTasks.length
+      this.memoryAutoSyncLastSyncAt = result.syncedAt;
+      this.memoryAutoSyncLastSource = source;
+      this.memoryAutoSyncLastResult = dedupHit ? 'skipped' : 'synced';
+      this.memoryAutoSyncLastError = '';
+
+      if (!(suppressLog && dedupHit)) {
+        await this.logService.append({
+          action: 'squad.reporting.sync_memory',
+          type: 'squad',
+          target: source,
+          status: dedupHit ? 'skipped' : 'success',
+          message: dedupHit
+            ? `记忆同步去重命中（${formatCstClock(now)}）`
+            : `记忆同步完成（${formatCstClock(now)}）`,
+          meta: {
+            source,
+            dryRun,
+            dedupHit,
+            force,
+            fingerprint: fingerprint.slice(0, 12),
+            blockedCount: blockedTasks.length,
+            engine: clippedReporting?.engine
+          }
+        });
       }
-    };
+
+      return result;
+    } finally {
+      this.memorySyncInFlight = false;
+    }
   }
 
   async createTask(input = {}) {

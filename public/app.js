@@ -120,7 +120,8 @@ const state = {
     warningRoles: [],
     executor: {},
     causeLabels: {},
-    reporting: {}
+    reporting: {},
+    memorySync: {}
   },
 
   trendingData: null,
@@ -1473,7 +1474,8 @@ async function loadSquadState() {
     warningRoles: toArray(payload.warningRoles),
     executor: asObject(payload.executor),
     causeLabels: asObject(payload.causeLabels),
-    reporting: asObject(payload.reporting)
+    reporting: asObject(payload.reporting),
+    memorySync: asObject(payload.memorySync)
   };
   renderSquadState();
 }
@@ -1504,6 +1506,21 @@ function renderSquadRoles() {
   executorLine.textContent = `执行器：${executor.enabled ? '已启用' : '未启用'}｜tick ${tickSec}s｜最近心跳 ${formatTime(executor.lastTickAt)}｜自动闭环 ${formatNumber(executor.stats?.autoCompleted)} 次`;
   executorItem.append(executorLine);
   dom.squadRoleBoard.appendChild(executorItem);
+
+  const memorySync = state.squad.memorySync || {};
+  const memoryItem = document.createElement('div');
+  memoryItem.className = 'list-item';
+  const memoryLine = document.createElement('small');
+  const memoryTickSec = Math.max(1, Math.round(Number(memorySync.intervalMs || 0) / 1000));
+  memoryLine.textContent = `记忆同步器：${memorySync.enabled ? '已启用' : '未启用'}｜tick ${memoryTickSec}s｜最近同步 ${formatTime(memorySync.lastSyncAt)}｜结果 ${pickText(memorySync.lastResult, '-')}｜成功 ${formatNumber(memorySync.stats?.synced)} 次 / 跳过 ${formatNumber(memorySync.stats?.skipped)} 次`;
+  memoryItem.append(memoryLine);
+  if (pickText(memorySync.lastError)) {
+    const memoryErr = document.createElement('small');
+    memoryErr.className = 'warning-text';
+    memoryErr.textContent = `同步器异常：${pickText(memorySync.lastError)}`;
+    memoryItem.append(memoryErr);
+  }
+  dom.squadRoleBoard.appendChild(memoryItem);
 
   const reporting = state.squad.reporting || {};
   const alertRows = toArray(reporting.alerts).slice(0, 4).map((item) => pickText(item)).filter(Boolean);
