@@ -587,6 +587,22 @@ function stripLinkedPrefix(title) {
   return pickText(title).replace(/^\[协同\]\s*/u, '');
 }
 
+function inferTaskSemanticTitle(task = {}) {
+  const cleanTitle = stripLinkedPrefix(task?.title);
+  const lower = cleanTitle.toLowerCase();
+  const hasChinese = /[一-龥]/u.test(cleanTitle);
+  if (hasChinese) return cleanTitle;
+  if (/news|brief|report|summary|汇报|新闻/u.test(cleanTitle)) return '新闻情报汇总与播报';
+  if (/login|auth|token|permission/u.test(lower)) return '登录鉴权链路修复';
+  if (/memory|sync|archive/u.test(lower)) return '记忆同步与归档优化';
+  if (/timeout|latency|delay/u.test(lower)) return '超时与时延治理';
+  if (/scroll|page|pagination|list/u.test(lower)) return '任务大厅展示优化';
+  if (/bug|fix|error|issue/u.test(lower)) return '问题修复任务';
+  if (/test|qa|verify|smoke/u.test(lower)) return '质量回归验证任务';
+  if (/refactor|cleanup|optimi/u.test(lower)) return '结构优化与清理任务';
+  return '通用执行任务';
+}
+
 function taskSourceLabel(task = {}) {
   const source = pickText(task?.dispatchSource).toLowerCase();
   const relation = pickText(task?.relationType, 'primary').toLowerCase();
@@ -599,19 +615,20 @@ function taskSourceLabel(task = {}) {
 function taskRoleAction(task = {}) {
   const roleId = pickText(task?.roleId);
   const intent = pickText(ROLE_WORK_INTENT[roleId], '推进任务执行');
-  const cleanTitle = stripLinkedPrefix(task?.title);
+  const semantic = inferTaskSemanticTitle(task);
   if (pickText(task?.relationType, 'primary').toLowerCase() === 'linked') {
-    return `${intent}，协同支援主任务《${cleanTitle}》`;
+    return `${intent}，协同支援主任务《${semantic}》`;
   }
-  return `${intent}，主责推进《${cleanTitle}》`;
+  return `${intent}，主责推进《${semantic}》`;
 }
 
 function taskDisplayTitle(task = {}) {
   const cleanTitle = stripLinkedPrefix(task?.title);
+  const semantic = inferTaskSemanticTitle(task);
   if (pickText(task?.relationType, 'primary').toLowerCase() === 'linked') {
-    return `协同任务｜${cleanTitle}`;
+    return `协同任务｜${semantic}（原题：${cleanTitle}）`;
   }
-  return `主线任务｜${cleanTitle}`;
+  return `主线任务｜${semantic}（原题：${cleanTitle}）`;
 }
 
 function buildTaskGroupRosterMap(tasks = []) {
