@@ -128,7 +128,7 @@ const DEFAULT_ROLES = [
     codename: 'Neon Scout',
     specialty: '情报检索 / 事实交叉验证 / 线索收敛',
     vibe: '快、准、冷静',
-    avatar: '/avatars/roles/neon-scout.svg'
+    avatar: 'avatars/roles/neon-scout.svg'
   },
   {
     id: 'code-claw',
@@ -136,7 +136,7 @@ const DEFAULT_ROLES = [
     codename: 'Code Claw',
     specialty: '功能开发 / 修复 / 重构',
     vibe: '稳、狠、可维护',
-    avatar: '/avatars/roles/code-claw.svg'
+    avatar: 'avatars/roles/code-claw.svg'
   },
   {
     id: 'radar-qa',
@@ -144,7 +144,7 @@ const DEFAULT_ROLES = [
     codename: 'Radar QA',
     specialty: '回归测试 / 边界场景 / 质量门禁',
     vibe: '严、细、可复现',
-    avatar: '/avatars/roles/radar-qa.svg'
+    avatar: 'avatars/roles/radar-qa.svg'
   },
   {
     id: 'ops-tide',
@@ -152,7 +152,7 @@ const DEFAULT_ROLES = [
     codename: 'Ops Tide',
     specialty: '服务巡检 / 性能诊断 / 稳定性保障',
     vibe: '警觉、务实、抗压',
-    avatar: '/avatars/roles/ops-tide.svg'
+    avatar: 'avatars/roles/ops-tide.svg'
   },
   {
     id: 'doc-pulse',
@@ -160,7 +160,7 @@ const DEFAULT_ROLES = [
     codename: 'Doc Pulse',
     specialty: '文档沉淀 / 方案说明 / 变更记录',
     vibe: '清晰、结构化、可追溯',
-    avatar: '/avatars/roles/doc-pulse.svg'
+    avatar: 'avatars/roles/doc-pulse.svg'
   }
 ];
 
@@ -171,6 +171,13 @@ function clamp(value, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, n));
+}
+
+function normalizeAvatarPath(input = '') {
+  const value = pickText(input);
+  if (!value) return '';
+  if (/^(https?:)?\/\//i.test(value) || /^data:/i.test(value)) return value;
+  return value.replace(/^\/+/, '');
 }
 
 function numberOr(value, fallback) {
@@ -639,7 +646,7 @@ function roleTemplate(base = {}) {
     codename: pickText(base.codename),
     specialty: pickText(base.specialty),
     vibe: pickText(base.vibe),
-    avatar: pickText(base.avatar),
+    avatar: normalizeAvatarPath(base.avatar),
     score: BASE_SCORE,
     status: 'active',
     totalTasks: 0,
@@ -1175,7 +1182,7 @@ class SquadService {
           codename: pickText(role?.codename, defaultRole?.codename),
           specialty: pickText(role?.specialty, defaultRole?.specialty),
           vibe: pickText(role?.vibe, defaultRole?.vibe),
-          avatar: pickText(role?.avatar, defaultRole?.avatar),
+          avatar: normalizeAvatarPath(pickText(role?.avatar, defaultRole?.avatar)),
           score,
           dispatchDoctrine: pickText(role?.dispatchDoctrine, CAPTAIN_DISPATCH_DOCTRINE),
           failureEvents: Number(role?.failureEvents) || Number(role?.failedTasks) || 0,

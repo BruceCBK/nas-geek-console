@@ -2382,16 +2382,19 @@ function buildRoleAvatar(role = {}, className = 'role-avatar') {
   fallback.textContent = fallbackMap[pickText(role.id)] || '🦞';
 
   const defaultAvatarMap = {
-    'neon-scout': '/avatars/roles/neon-scout.svg',
-    'code-claw': '/avatars/roles/code-claw.svg',
-    'radar-qa': '/avatars/roles/radar-qa.svg',
-    'ops-tide': '/avatars/roles/ops-tide.svg',
-    'doc-pulse': '/avatars/roles/doc-pulse.svg'
+    'neon-scout': 'avatars/roles/neon-scout.svg',
+    'code-claw': 'avatars/roles/code-claw.svg',
+    'radar-qa': 'avatars/roles/radar-qa.svg',
+    'ops-tide': 'avatars/roles/ops-tide.svg',
+    'doc-pulse': 'avatars/roles/doc-pulse.svg'
   };
 
   const src = pickText(role.avatar, defaultAvatarMap[pickText(role.id)]);
   if (src) {
-    avatar.src = src;
+    const normalizedSrc = /^(https?:)?\/\//i.test(src) || /^data:/i.test(src)
+      ? src
+      : src.replace(/^\/+/, '');
+    avatar.src = normalizedSrc;
     avatar.addEventListener('error', () => {
       avatar.replaceWith(fallback);
     }, { once: true });
