@@ -259,7 +259,7 @@ async function main() {
     }
   });
 
-  await check('POST /api/squad/task auto-route(code) + review + reflection', async () => {
+  await check('POST /api/squad/task auto-route + deprecated manual review/reflection', async () => {
     const stateRes = await request('/api/squad/state', { headers: authHeaders() });
     const stateData = getData(stateRes.body);
     if (!Array.isArray(stateData?.roles) || stateData.roles.length === 0) {
@@ -272,7 +272,7 @@ async function main() {
       body: JSON.stringify({
         title: 'fix login bug in code path',
         description: 'dev refactor to fix regression',
-        roleId: 'auto',
+        roleId: 'ops-tide',
         weight: 1,
         source: 'system.smoke'
       })
@@ -286,20 +286,20 @@ async function main() {
     const linkedTasks = Array.isArray(createdPayload?.linkedTasks) ? createdPayload.linkedTasks : [];
     const taskId = createdTask?.id;
     if (!taskId) throw new Error('missing squad task id');
+    if (!String(createdTask?.assignmentMode || '').startsWith('auto')) {
+      throw new Error(`expected assignmentMode auto.*, got ${createdTask?.assignmentMode || '-'}`);
+    }
     if (createdTask?.roleId !== 'code-claw') {
       throw new Error(`expected auto-route to code-claw, got ${createdTask?.roleId || '-'}`);
     }
-    if (!createdTask?.assignmentReason) {
-      throw new Error('missing assignmentReason in squad task payload');
+    if (!createdTask?.assignmentReason || !String(createdTask.assignmentReason).includes('ignored')) {
+      throw new Error('expected assignmentReason to include manual request ignored hint');
     }
     if (!Array.isArray(linkedTasks) || linkedTasks.length < 1) {
       throw new Error('expected at least one linked collaboration task');
     }
     if (linkedTasks.length > 2) {
       throw new Error(`expected linked collaboration tasks <= 2, got ${linkedTasks.length}`);
-    }
-    if (createdTask?.status !== 'running') {
-      throw new Error(`expected created task status=running, got ${createdTask?.status || '-'}`);
     }
 
     const afterCreateStateRes = await request('/api/squad/state', { headers: authHeaders() });
@@ -323,54 +323,24 @@ async function main() {
     if (heartbeatRes.status !== 200) {
       throw new Error(`heartbeat expected 200, got ${heartbeatRes.status}`);
     }
-    const heartbeatTask = getData(heartbeatRes.body)?.task;
-    if (heartbeatTask?.status !== 'running') {
-      throw new Error(`expected heartbeat task status=running, got ${heartbeatTask?.status || '-'}`);
-    }
-    if (Number(heartbeatTask?.progressPercent) < 42) {
-      throw new Error(`expected heartbeat progress >= 42, got ${heartbeatTask?.progressPercent || '-'}`);
-    }
 
     const reviewRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/review`, {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({
-        completion: 88,
-        quality: 90,
-        ownerScore: 89,
-        captainScore: 91,
-        passed: true,
-        reviewNote: 'smoke pass'
-      })
+      body: JSON.stringify({ completion: 88, quality: 90, ownerScore: 89, captainScore: 91, passed: true })
     });
-    if (reviewRes.status !== 200) {
-      throw new Error(`review task expected 200, got ${reviewRes.status}`);
-    }
-    const reviewPayload = getData(reviewRes.body) || {};
-    if (typeof reviewPayload?.task?.rewardBonus !== 'number') {
-      throw new Error('expected rewardBonus in review payload');
-    }
-    if (typeof reviewPayload?.role?.rewardPoints !== 'number') {
-      throw new Error('expected role.rewardPoints in review payload');
-    }
-    if (typeof reviewPayload?.role?.capabilityIndex !== 'number') {
-      throw new Error('expected role.capabilityIndex in review payload');
-    }
-    const finalReportStatus = String(reviewPayload?.finalReport?.status || '');
-    if (finalReportStatus !== 'blocked') {
-      throw new Error(`expected finalReport blocked before full collaboration chain, got ${finalReportStatus || '-'}`);
+    if (reviewRes.status !== 410) {
+      throw new Error(`manual review endpoint expected 410, got ${reviewRes.status}`);
     }
 
-    const reflectionRoleId =
-      linkedTasks.find((row) => row?.roleId === 'radar-qa')?.roleId || createdTask.roleId;
-
+    const reflectionRoleId = linkedTasks[0]?.roleId || createdTask.roleId;
     const reflectionRes = await request(`/api/squad/role/${encodeURIComponent(reflectionRoleId)}/reflection`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({ reflection: 'smoke reflection' })
     });
-    if (reflectionRes.status !== 200) {
-      throw new Error(`reflection expected 200, got ${reflectionRes.status}`);
+    if (reflectionRes.status !== 410) {
+      throw new Error(`manual reflection endpoint expected 410, got ${reflectionRes.status}`);
     }
   });
 

@@ -73,20 +73,8 @@ const dom = {
   squadTaskPageInfo: document.getElementById('squadTaskPageInfo'),
   squadTaskTitleInput: document.getElementById('squadTaskTitleInput'),
   squadTaskDescInput: document.getElementById('squadTaskDescInput'),
-  squadTaskRoleSelect: document.getElementById('squadTaskRoleSelect'),
   squadTaskWeightInput: document.getElementById('squadTaskWeightInput'),
   squadCreateTaskBtn: document.getElementById('squadCreateTaskBtn'),
-  squadReviewTaskIdInput: document.getElementById('squadReviewTaskIdInput'),
-  squadReviewCompletionInput: document.getElementById('squadReviewCompletionInput'),
-  squadReviewQualityInput: document.getElementById('squadReviewQualityInput'),
-  squadReviewOwnerInput: document.getElementById('squadReviewOwnerInput'),
-  squadReviewCaptainInput: document.getElementById('squadReviewCaptainInput'),
-  squadReviewPassedSelect: document.getElementById('squadReviewPassedSelect'),
-  squadReviewNoteInput: document.getElementById('squadReviewNoteInput'),
-  squadSubmitReviewBtn: document.getElementById('squadSubmitReviewBtn'),
-  squadReflectionRoleSelect: document.getElementById('squadReflectionRoleSelect'),
-  squadReflectionText: document.getElementById('squadReflectionText'),
-  squadSubmitReflectionBtn: document.getElementById('squadSubmitReflectionBtn'),
   squadMsg: document.getElementById('squadMsg'),
 
   wechatSearchInput: document.getElementById('wechatSearchInput'),
@@ -318,12 +306,6 @@ function wireEvents() {
   });
   dom.squadCreateTaskBtn?.addEventListener('click', () => {
     createSquadTask().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
-  });
-  dom.squadSubmitReviewBtn?.addEventListener('click', () => {
-    submitSquadReview().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
-  });
-  dom.squadSubmitReflectionBtn?.addEventListener('click', () => {
-    submitSquadReflection().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
   });
 
   dom.tabButtons.forEach((button) => {
@@ -1657,8 +1639,9 @@ function renderSquadRoles() {
 
   const hiddenSynthetic = Number(state.squad.summary?.hiddenSyntheticTasks || 0);
   const hiddenStaleBridge = Number(state.squad.summary?.hiddenStaleBridgeTasks || 0);
-  if (hiddenSynthetic > 0 || hiddenStaleBridge > 0) {
-    appendMetaCard(`已隐藏 ${formatNumber(hiddenSynthetic)} 条系统测试任务，归档 ${formatNumber(hiddenStaleBridge)} 条历史桥接任务，避免任务大厅失真`);
+  const unsyncedBridge = Number(state.squad.summary?.unsyncedBridgeTasks || 0);
+  if (hiddenSynthetic > 0 || hiddenStaleBridge > 0 || unsyncedBridge > 0) {
+    appendMetaCard(`已隐藏 ${formatNumber(hiddenSynthetic)} 条系统测试任务，归档 ${formatNumber(hiddenStaleBridge)} 条历史桥接任务，待补齐桥接 ${formatNumber(unsyncedBridge)} 条`);
   }
 
   const reporting = state.squad.reporting || {};
@@ -1732,7 +1715,7 @@ function renderSquadRoles() {
     item.append(chips);
 
     const stat = document.createElement('small');
-    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜风险 ${formatNumber(role.atRiskTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
+    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜风险 ${formatNumber(role.atRiskTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜重复问题 ${formatNumber(role.repeatTaskCount)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
     item.append(stat);
 
     if (status === 'warning') {
@@ -1743,7 +1726,7 @@ function renderSquadRoles() {
       warn.textContent =
         blockedCount > 0
           ? `⚠ 当前阻塞 ${formatNumber(blockedCount)} 条（主因：${topCauseLabel}）：${pickText(role.reflection, '请立即排障并补充进度心跳')}`
-          : `⚠ 低于60分：${pickText(role.reflection, '需提交自省与改进计划')}`;
+          : `⚠ 自动评分预警：${pickText(role.reflection, '请优先处理重复问题并提升交付质量')}`;
       item.append(warn);
     }
 
@@ -1751,6 +1734,13 @@ function renderSquadRoles() {
       const growth = document.createElement('small');
       growth.textContent = `成长建议：${pickText(role.growthFocus)}`;
       item.append(growth);
+    }
+
+    const scoreReason = pickText(role?.scoreBreakdown?.reason);
+    if (scoreReason) {
+      const reason = document.createElement('small');
+      reason.textContent = `评分依据：${scoreReason}`;
+      item.append(reason);
     }
 
     dom.squadRoleBoard.appendChild(item);
@@ -2007,14 +1997,7 @@ function renderSquadTasks() {
         reportSquadTaskHeartbeat(task).catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
       });
 
-      const useForReviewBtn = document.createElement('button');
-      useForReviewBtn.textContent = '填入评分ID';
-      useForReviewBtn.addEventListener('click', () => {
-        if (dom.squadReviewTaskIdInput) dom.squadReviewTaskIdInput.value = pickText(task.id);
-        setMessage(dom.squadMsg, `已填入任务ID：${pickText(task.id)}`, 'info');
-      });
-
-      actions.append(heartbeatBtn, useForReviewBtn);
+      actions.append(heartbeatBtn);
       item.append(actions);
     }
 
@@ -2039,56 +2022,9 @@ function renderSquadTasks() {
 }
 
 function renderSquadRoleSelectors() {
-  const roles = toArray(state.squad.roles);
-
-  if (dom.squadTaskRoleSelect) {
-    const current = pickText(dom.squadTaskRoleSelect.value);
-    dom.squadTaskRoleSelect.innerHTML = '';
-
-    const autoOpt = document.createElement('option');
-    autoOpt.value = 'auto';
-    autoOpt.textContent = '自动路由（关键词 + 负载）';
-    dom.squadTaskRoleSelect.appendChild(autoOpt);
-
-    roles.forEach((role) => {
-      const opt = document.createElement('option');
-      opt.value = pickText(role.id);
-      opt.textContent = `${pickText(role.name)} (${pickText(role.codename)})`;
-      dom.squadTaskRoleSelect.appendChild(opt);
-    });
-
-    if (current === 'auto' || !current) {
-      dom.squadTaskRoleSelect.value = 'auto';
-    } else if (roles.some((r) => r.id === current)) {
-      dom.squadTaskRoleSelect.value = current;
-    } else {
-      dom.squadTaskRoleSelect.value = 'auto';
-    }
-  }
-
-  if (dom.squadReflectionRoleSelect) {
-    const current = pickText(dom.squadReflectionRoleSelect.value);
-    dom.squadReflectionRoleSelect.innerHTML = '';
-
-    const first = document.createElement('option');
-    first.value = '';
-    first.textContent = '选择提交自省的角色';
-    dom.squadReflectionRoleSelect.appendChild(first);
-
-    roles.forEach((role) => {
-      const opt = document.createElement('option');
-      opt.value = pickText(role.id);
-      opt.textContent = `${pickText(role.name)} (${pickText(role.codename)})`;
-      dom.squadReflectionRoleSelect.appendChild(opt);
-    });
-
-    if (current && roles.some((r) => r.id === current)) {
-      dom.squadReflectionRoleSelect.value = current;
-    } else if (!current && roles[0]) {
-      dom.squadReflectionRoleSelect.value = roles[0].id;
-    }
-  }
+  // 手动派发/手动评分/低分自省模块已下线，保留函数用于兼容调用链。
 }
+
 
 async function syncSquadReportingMemory() {
   await withButtons([dom.squadSyncMemoryBtn], async () => {
@@ -2139,7 +2075,7 @@ async function syncSquadTaskBoardNow() {
 
 async function createSquadTask() {
   const title = pickText(dom.squadTaskTitleInput?.value);
-  const roleId = pickText(dom.squadTaskRoleSelect?.value, 'auto');
+  const roleId = 'auto';
   const description = pickText(dom.squadTaskDescInput?.value);
   const weight = Number(dom.squadTaskWeightInput?.value || 1);
 
@@ -2163,7 +2099,6 @@ async function createSquadTask() {
 
     if (dom.squadTaskTitleInput) dom.squadTaskTitleInput.value = '';
     if (dom.squadTaskDescInput) dom.squadTaskDescInput.value = '';
-    if (dom.squadReviewTaskIdInput) dom.squadReviewTaskIdInput.value = pickText(payload.task?.id);
 
     await Promise.allSettled([loadSquadState({ keepPage: false }), loadDashboardSummary()]);
     const routedRole = pickText(payload.task?.roleName, payload.task?.roleId, '自动路由');
@@ -2238,68 +2173,6 @@ async function retrySquadFinalReport(task) {
   }
 
   setMessage(dom.squadMsg, `最终汇报重试状态：${status}`, 'info');
-}
-
-async function submitSquadReview() {
-  const taskId = pickText(dom.squadReviewTaskIdInput?.value);
-  if (!taskId) {
-    setMessage(dom.squadMsg, '请输入任务ID', 'error');
-    return;
-  }
-
-  const completion = Number(dom.squadReviewCompletionInput?.value || 0);
-  const quality = Number(dom.squadReviewQualityInput?.value || 0);
-  const ownerScore = Number(dom.squadReviewOwnerInput?.value || 0);
-  const captainScore = Number(dom.squadReviewCaptainInput?.value || 0);
-  const passed = pickText(dom.squadReviewPassedSelect?.value, 'true') === 'true';
-  const reviewNote = pickText(dom.squadReviewNoteInput?.value);
-
-  await withButtons([dom.squadSubmitReviewBtn], async () => {
-    setMessage(dom.squadMsg, '评分提交中...', 'info', 0);
-    const payload = await apiJson(`/api/squad/task/${encodeURIComponent(taskId)}/review`, {
-      method: 'POST',
-      body: {
-        completion,
-        quality,
-        ownerScore,
-        captainScore,
-        passed,
-        reviewNote
-      }
-    });
-
-    await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
-    const roleName = pickText(payload.role?.name, payload.role?.codename, '角色');
-    const finalReportState = pickText(payload?.finalReport?.status);
-    const extra = finalReportState ? `｜最终汇报：${finalReportState}` : '';
-    setMessage(dom.squadMsg, `评分完成：${roleName} 当前 ${formatNumber(payload.role?.score)} 分${extra}`, 'success');
-  });
-}
-
-async function submitSquadReflection() {
-  const roleId = pickText(dom.squadReflectionRoleSelect?.value);
-  const reflection = pickText(dom.squadReflectionText?.value);
-
-  if (!roleId) {
-    setMessage(dom.squadMsg, '请选择角色', 'error');
-    return;
-  }
-  if (!reflection) {
-    setMessage(dom.squadMsg, '请填写自省内容', 'error');
-    return;
-  }
-
-  await withButtons([dom.squadSubmitReflectionBtn], async () => {
-    setMessage(dom.squadMsg, '自省提交中...', 'info', 0);
-    await apiJson(`/api/squad/role/${encodeURIComponent(roleId)}/reflection`, {
-      method: 'POST',
-      body: { reflection }
-    });
-
-    if (dom.squadReflectionText) dom.squadReflectionText.value = '';
-    await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
-    setMessage(dom.squadMsg, '已提交自省，积分模型已更新', 'success');
-  });
 }
 
 function renderTaskList(container, rows, options = {}) {

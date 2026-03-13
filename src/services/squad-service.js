@@ -311,17 +311,18 @@ function executorStepForTask(task = {}) {
 
 function buildExecutorReviewPayload(task = {}) {
   const progress = clamp(task.progressPercent, 0, 100);
-  const completion = clamp(progress + 3, 85, 100);
-  const qualityBase = 86 + Math.min(10, Math.floor((progress - 60) / 6));
-  const quality = clamp(qualityBase, 80, 98);
+  const blockedCount = Math.max(0, Number(task?.blockedCount) || 0);
+  const completion = clamp(progress + 1 - blockedCount * 6, 65, 98);
+  const qualityBase = 80 + Math.min(8, Math.floor((progress - 60) / 7));
+  const quality = clamp(qualityBase - blockedCount * 8, 58, 92);
 
   return {
     completion,
     quality,
-    ownerScore: clamp(quality - 1, 80, 98),
-    captainScore: clamp(quality + 1, 80, 99),
-    passed: true,
-    reviewNote: '队长自动验收：执行器持续心跳达标，任务闭环完成。'
+    ownerScore: clamp(quality - 2, 55, 95),
+    captainScore: clamp(quality + 1, 58, 96),
+    passed: progress >= 90,
+    reviewNote: '自动验收：基于执行心跳、阻塞历史与完成质量综合判定。'
   };
 }
 
@@ -499,25 +500,7 @@ function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title,
   const requested = pickText(requestedRoleId);
   const normalizedRequest = requested.toLowerCase();
   const loadMap = buildRoleLoadMap(tasks);
-
-  if (requested && normalizedRequest !== AUTO_ROLE_ID) {
-    const manualRole = roleRows.find((r) => r.id === requested);
-    if (!manualRole) throw new HttpError(404, 'SQUAD_ROLE_NOT_FOUND', `未找到角色: ${requested}`);
-    const manualLoad = getLoad(loadMap, manualRole.id);
-    const collaborationRoleIds = pickCollaborationRoles({
-      primaryRoleId: manualRole.id,
-      scoredRows: [],
-      roles: roleRows,
-      loadMap
-    });
-    return {
-      role: manualRole,
-      matchedRoleIds: [manualRole.id],
-      collaborationRoleIds,
-      assignmentMode: 'manual',
-      assignmentReason: `manual roleId=${manualRole.id}; ${describeLoad(manualLoad)}`
-    };
-  }
+  const manualRequestIgnored = Boolean(requested && normalizedRequest !== AUTO_ROLE_ID);
 
   const source = `${pickText(title)} ${pickText(description)}`.trim().toLowerCase();
   const scored = roleRows
@@ -548,7 +531,7 @@ function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title,
       matchedRoleIds: scored.map((row) => row.role.id),
       collaborationRoleIds,
       assignmentMode: 'auto.keyword',
-      assignmentReason: `auto keyword[${pickedRow?.matches?.join(', ') || ''}] -> ${picked.id}; ${describeLoad(pickedLoad)}`
+      assignmentReason: `${manualRequestIgnored ? `manual roleId=${requested} ignored; ` : ''}auto keyword[${pickedRow?.matches?.join(', ') || ''}] -> ${picked.id}; ${describeLoad(pickedLoad)}`
     };
   }
 
@@ -565,7 +548,7 @@ function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title,
     matchedRoleIds: [],
     collaborationRoleIds,
     assignmentMode: 'auto.balance',
-    assignmentReason: `auto balance(no keyword) -> ${picked.id}; ${describeLoad(pickedLoad)}`
+    assignmentReason: `${manualRequestIgnored ? `manual roleId=${requested} ignored; ` : ''}auto balance(no keyword) -> ${picked.id}; ${describeLoad(pickedLoad)}`
   };
 }
 
@@ -699,6 +682,220 @@ function taskStatusLabel(status) {
 
 function stripLinkedPrefix(title) {
   return pickText(title).replace(/^\[协同\]\s*/u, '');
+}
+
+function normalizeIssueText(input = '') {
+  const raw = pickText(input);
+  if (!raw) return '';
+
+  let text = raw;
+  const sourceMatch = text.match(/原题：(.+?)）$/u);
+  if (sourceMatch?.[1]) {
+    text = sourceMatch[1];
+  }
+
+  text = stripLinkedPrefix(text)
+    .replace(/^主线任务｜/u, '')
+    .replace(/^协同任务｜/u, '')
+    .replace(/（原题：.+$/u, '')
+    .replace(/[​﻿]/gu, '')
+    .toLowerCase();
+
+  text = text.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  return text.slice(0, 180);
+}
+
+function taskIssueKey(task = {}) {
+  return normalizeIssueText(
+    pickText(task?.sourceTitle, task?.title, task?.displayTitle, task?.description, task?.goal)
+  );
+}
+
+function isRepairTask(task = {}) {
+  const text = `${pickText(task?.title)} ${pickText(task?.description)} ${pickText(task?.reviewNote)}`.toLowerCase();
+  return /(bug|fix|issue|error|retry|rollback|hotfix|修复|问题|异常|回滚|重试|补丁|同步不上|没更新)/u.test(text);
+}
+
+function collectRoleRepeatIssueStats(taskRows = [], roleId = '', nowMs = Date.now()) {
+  const targetRoleId = pickText(roleId);
+  if (!targetRoleId) {
+    return {
+      repeatIssueCount: 0,
+      repeatTaskCount: 0,
+      repeatedFailedCount: 0,
+      keys: []
+    };
+  }
+
+  const windowMs = 14 * 24 * 60 * 60 * 1000;
+  const map = new Map();
+
+  for (const task of toArray(taskRows)) {
+    if (!task || pickText(task?.roleId) !== targetRoleId) continue;
+    if (isSyntheticSmokeTask(task)) continue;
+    if (pickText(task?.relationType, 'primary').toLowerCase() !== 'primary') continue;
+
+    const recencyMs = taskRecencyMs(task);
+    if (recencyMs > 0 && nowMs - recencyMs > windowMs) continue;
+
+    const key = taskIssueKey(task);
+    if (!key) continue;
+
+    const row = map.get(key) || { total: 0, failed: 0 };
+    row.total += 1;
+    const status = pickText(task?.status).toLowerCase();
+    if (status === 'failed' || status === 'blocked') row.failed += 1;
+    map.set(key, row);
+  }
+
+  let repeatIssueCount = 0;
+  let repeatTaskCount = 0;
+  let repeatedFailedCount = 0;
+  const keys = [];
+  for (const [key, row] of map.entries()) {
+    if (row.total < 2) continue;
+    repeatIssueCount += 1;
+    repeatTaskCount += Math.max(0, row.total - 1);
+    repeatedFailedCount += Math.max(0, row.failed);
+    keys.push(key);
+  }
+
+  return {
+    repeatIssueCount,
+    repeatTaskCount,
+    repeatedFailedCount,
+    keys
+  };
+}
+
+function calculateTaskRecurrencePenalty(taskRows = [], task = {}) {
+  if (!task || isSyntheticSmokeTask(task)) {
+    return {
+      issueKey: '',
+      repeatIssueCount: 0,
+      repeatTaskCount: 0,
+      repeatedFailedCount: 0,
+      penalty: 0
+    };
+  }
+
+  const issueKey = taskIssueKey(task);
+  if (!issueKey) {
+    return {
+      issueKey: '',
+      repeatIssueCount: 0,
+      repeatTaskCount: 0,
+      repeatedFailedCount: 0,
+      penalty: 0
+    };
+  }
+
+  const roleId = pickText(task?.roleId);
+  const nowMs = taskRecencyMs(task) || Date.now();
+  const windowMs = 21 * 24 * 60 * 60 * 1000;
+
+  const related = toArray(taskRows).filter((row) => {
+    if (!row || pickText(row?.roleId) !== roleId) return false;
+    if (isSyntheticSmokeTask(row)) return false;
+    if (pickText(row?.relationType, 'primary').toLowerCase() !== 'primary') return false;
+
+    const rowRecencyMs = taskRecencyMs(row);
+    if (rowRecencyMs > 0 && nowMs - rowRecencyMs > windowMs) return false;
+    return taskIssueKey(row) === issueKey;
+  });
+
+  const repeatIssueCount = related.length >= 2 ? 1 : 0;
+  const repeatTaskCount = Math.max(0, related.length - 1);
+  const repeatedFailedCount = related.filter((row) => {
+    const status = pickText(row?.status).toLowerCase();
+    return status === 'failed' || status === 'blocked';
+  }).length;
+  const penalty = Math.min(20, repeatTaskCount * 6 + repeatedFailedCount * 3);
+
+  return {
+    issueKey,
+    repeatIssueCount,
+    repeatTaskCount,
+    repeatedFailedCount,
+    penalty
+  };
+}
+
+function buildAutomatedRoleScore(input = {}) {
+  const totalTasks = Math.max(0, Number(input.totalTasks) || 0);
+  const completedTasks = Math.max(0, Number(input.completedTasks) || 0);
+  const unresolvedFailures = Math.max(0, Number(input.unresolvedFailures) || 0);
+  const blockedTasks = Math.max(0, Number(input.blockedTasks) || 0);
+  const staleOpenTasks = Math.max(0, Number(input.staleOpenTasks) || 0);
+  const pendingTasks = Math.max(0, Number(input.pendingTasks) || 0);
+  const avgCompletion = Math.max(0, Number(input.avgCompletion) || 0);
+  const avgQuality = Math.max(0, Number(input.avgQuality) || 0);
+  const repeatIssueCount = Math.max(0, Number(input.repeatIssueCount) || 0);
+  const repeatTaskCount = Math.max(0, Number(input.repeatTaskCount) || 0);
+  const repeatedFailedCount = Math.max(0, Number(input.repeatedFailedCount) || 0);
+
+  if (totalTasks <= 0) {
+    return {
+      score: 80,
+      penalties: {
+        unresolvedFailures: 0,
+        blocked: 0,
+        staleOpen: 0,
+        repeatIssue: 0,
+        qualityDebt: 0,
+        completionDebt: 0,
+        openLoad: 0,
+        repairPressure: 0
+      },
+      bonus: 0,
+      reason: '暂无历史任务，采用自动基线分'
+    };
+  }
+
+  const penaltyUnresolved = unresolvedFailures * 16;
+  const penaltyBlocked = blockedTasks * 7;
+  const penaltyStaleOpen = staleOpenTasks * 6;
+  const penaltyRepeatIssue = repeatIssueCount * 9 + repeatTaskCount * 7 + repeatedFailedCount * 4;
+  const penaltyQualityDebt = Math.round(Math.max(0, 85 - avgQuality) * 0.8);
+  const penaltyCompletionDebt = Math.round(Math.max(0, 85 - avgCompletion) * 0.6);
+  const penaltyOpenLoad = Math.max(0, pendingTasks - 1) * 2;
+  const repairTasks = Math.max(0, Number(input.repairTasks) || 0);
+  const penaltyRepairPressure = Math.max(0, repairTasks - 1) * 4;
+
+  const cleanCompletedBonus = Math.min(
+    3,
+    Math.max(0, Number(input.cleanCompletedTasks) || 0)
+  );
+  const completionBonus = Math.min(4, Math.floor(completedTasks / 2));
+  const bonus = completionBonus + cleanCompletedBonus;
+
+  const totalPenalty =
+    penaltyUnresolved +
+    penaltyBlocked +
+    penaltyStaleOpen +
+    penaltyRepeatIssue +
+    penaltyQualityDebt +
+    penaltyCompletionDebt +
+    penaltyOpenLoad +
+    penaltyRepairPressure;
+
+  const score = clamp(Math.round(82 + bonus - totalPenalty), 0, 100);
+
+  return {
+    score,
+    penalties: {
+      unresolvedFailures: penaltyUnresolved,
+      blocked: penaltyBlocked,
+      staleOpen: penaltyStaleOpen,
+      repeatIssue: penaltyRepeatIssue,
+      qualityDebt: penaltyQualityDebt,
+      completionDebt: penaltyCompletionDebt,
+      openLoad: penaltyOpenLoad,
+      repairPressure: penaltyRepairPressure
+    },
+    bonus,
+    reason: `自动评分：奖励+${bonus}，惩罚-${totalPenalty}`
+  };
 }
 
 function inferTaskSemanticTitle(task = {}) {
@@ -1377,6 +1574,24 @@ class SquadService {
     }
   }
 
+  async _countUnsyncedBridgeTasks(taskRows = []) {
+    const longTasks = (await this._readLongTasks()).filter((task) => pickText(task?.id).startsWith('lt_'));
+    if (!longTasks.length) return 0;
+
+    const bridged = new Set(
+      toArray(taskRows)
+        .filter((task) => {
+          if (!task) return false;
+          if (pickText(task?.dispatchSource).toLowerCase() !== 'user.command.bridge') return false;
+          return pickText(task?.relationType, 'primary').toLowerCase() === 'primary';
+        })
+        .map((task) => pickText(task?.sourceTaskId))
+        .filter(Boolean)
+    );
+
+    return longTasks.reduce((acc, task) => (bridged.has(pickText(task?.id)) ? acc : acc + 1), 0);
+  }
+
   async _commandBridgeTick(options = {}) {
     if (!this.commandBridgeEnabled || this.commandBridgeTickRunning) return;
     this.commandBridgeTickRunning = true;
@@ -1643,7 +1858,7 @@ class SquadService {
 
           heartbeatTouched.push(next.id);
           if (next.progressPercent >= EXECUTOR_AUTO_COMPLETE_AT) {
-            completeCandidates.push({ id: next.id, progressPercent: next.progressPercent });
+            completeCandidates.push({ ...next });
           }
 
           return next;
@@ -1922,13 +2137,42 @@ class SquadService {
         Number(role?.failedTasks) || 0,
         unresolvedFailures
       );
-      const status = unresolvedFailures > 0 || Number(role?.score || 0) < WARNING_SCORE ? 'warning' : 'active';
       const causeStats = role?.blockCauseStats && typeof role.blockCauseStats === 'object' ? role.blockCauseStats : {};
       const topCause = Object.entries(causeStats)
         .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0]?.[0] || '';
+      const avgCompletion = Math.round(avg(roleTasks.map((task) => Number(task.completion) || 0)));
+      const avgQuality = Math.round(avg(roleTasks.map((task) => Number(task.quality) || 0)));
+      const staleOpenTasks = pendingTasks.filter((task) => {
+        const last = parseIsoMs(task?.lastHeartbeatAt || task?.startedAt || task?.createdAt);
+        return last > 0 && nowMs - last > TASK_RUNNING_STALE_MS;
+      }).length;
+      const cleanCompletedTasks = doneTasks.filter((task) => {
+        const blocked = Math.max(0, Number(task?.blockedCount) || 0);
+        return blocked <= 0 && Number(task?.quality) >= 85 && Number(task?.completion) >= 85;
+      }).length;
+      const repeatIssueStats = collectRoleRepeatIssueStats(taskRows, role.id, nowMs);
+      const repairTasks = roleTasks.filter((task) => isRepairTask(task)).length;
+      const autoScore = buildAutomatedRoleScore({
+        totalTasks: roleTasks.length,
+        completedTasks: doneTasks.length,
+        unresolvedFailures,
+        blockedTasks: blockedTasks.length,
+        staleOpenTasks,
+        pendingTasks: pendingTasks.length,
+        avgCompletion,
+        avgQuality,
+        cleanCompletedTasks,
+        repeatIssueCount: repeatIssueStats.repeatIssueCount,
+        repeatTaskCount: repeatIssueStats.repeatTaskCount,
+        repeatedFailedCount: repeatIssueStats.repeatedFailedCount,
+        repairTasks
+      });
+      const score = Number(autoScore.score);
+      const status = unresolvedFailures > 0 || score < WARNING_SCORE ? 'warning' : 'active';
 
       return {
         ...role,
+        score,
         status,
         totalTasks: roleTasks.length,
         doneTasks: doneTasks.length,
@@ -1940,9 +2184,19 @@ class SquadService {
         blockedPenaltyMultiplier: pressureMultiplier,
         topBlockCause: topCause,
         pendingTasks: pendingTasks.length,
-        avgCompletion: Math.round(avg(roleTasks.map((task) => Number(task.completion) || 0))),
-        avgQuality: Math.round(avg(roleTasks.map((task) => Number(task.quality) || 0))),
-        capabilityIndex: clamp(numberOr(role?.capabilityIndex, numberOr(role?.score, 100)), 0, 100),
+        staleOpenTasks,
+        avgCompletion,
+        avgQuality,
+        repeatIssueCount: repeatIssueStats.repeatIssueCount,
+        repeatTaskCount: repeatIssueStats.repeatTaskCount,
+        repeatedFailedCount: repeatIssueStats.repeatedFailedCount,
+        repairTasks,
+        scoreBreakdown: {
+          reason: pickText(autoScore.reason),
+          bonus: Math.max(0, Number(autoScore.bonus) || 0),
+          penalties: autoScore.penalties || {}
+        },
+        capabilityIndex: clamp(numberOr(role?.capabilityIndex, numberOr(score, 100)), 0, 100),
         growthFocus: pickText(role?.growthFocus, '保持高频心跳与高质量交付'),
         blockCauseStats: causeStats
       };
@@ -1965,6 +2219,7 @@ class SquadService {
       if (staleBridgeTasks.includes(task)) return false;
       return true;
     });
+    const unsyncedBridgeTasks = await this._countUnsyncedBridgeTasks(taskRows);
 
     const summary = {
       totalRoles: sortedRoles.length,
@@ -1977,7 +2232,8 @@ class SquadService {
       atRiskTasks: visibleTaskRows.filter((t) => pickText(t.runtimeRisk).toLowerCase() === 'at-risk').length,
       pendingTasks: visibleTaskRows.filter((t) => TASK_OPEN_STATUSES.has(pickText(t.status).toLowerCase())).length,
       hiddenSyntheticTasks: syntheticTasks.length,
-      hiddenStaleBridgeTasks: staleBridgeTasks.length
+      hiddenStaleBridgeTasks: staleBridgeTasks.length,
+      unsyncedBridgeTasks
     };
 
     const executor = {
@@ -2030,7 +2286,7 @@ class SquadService {
         id: row.id,
         name: row.name,
         score: row.score,
-        reflection: row.reflection
+        reflection: pickText(row?.scoreBreakdown?.reason, row.reflection)
       }))
     };
   }
@@ -2609,6 +2865,9 @@ class SquadService {
     baseDelta += passed ? 1 : -8 * weight;
     baseDelta = Math.round(clamp(baseDelta, -24, 18));
 
+    const recurrence = calculateTaskRecurrencePenalty(taskRows, updatedTask);
+    const repeatPenalty = Math.max(0, Number(recurrence.penalty) || 0);
+
     const rewardDecision = computeRewardDecision({
       passed,
       completion,
@@ -2617,12 +2876,16 @@ class SquadService {
       streakBefore: Number(role?.rewardStreak) || 0
     });
 
-    const rewardBonus = Math.max(0, Number(rewardDecision.bonus) || 0);
-    const delta = Math.round(clamp(baseDelta + rewardBonus, -24, 24));
+    const rawRewardBonus = Math.max(0, Number(rewardDecision.bonus) || 0);
+    const rewardBonus = recurrence.repeatTaskCount > 0 ? 0 : rawRewardBonus;
+    const delta = Math.round(clamp(baseDelta + rewardBonus - repeatPenalty, -28, 20));
 
     updatedTask.scoreDeltaBase = baseDelta;
     updatedTask.rewardBonus = rewardBonus;
     updatedTask.rewardReason = pickText(rewardDecision.reason);
+    updatedTask.repeatIssueKey = pickText(recurrence.issueKey);
+    updatedTask.repeatIssueCount = Math.max(0, Number(recurrence.repeatTaskCount) || 0);
+    updatedTask.repeatIssuePenalty = repeatPenalty;
     updatedTask.scoreDelta = delta;
 
     await this.taskStore.update((rows) => {
@@ -2634,6 +2897,9 @@ class SquadService {
           scoreDeltaBase: baseDelta,
           rewardBonus,
           rewardReason: pickText(rewardDecision.reason),
+          repeatIssueKey: pickText(recurrence.issueKey),
+          repeatIssueCount: Math.max(0, Number(recurrence.repeatTaskCount) || 0),
+          repeatIssuePenalty: repeatPenalty,
           scoreDelta: delta
         };
       }
@@ -2703,7 +2969,7 @@ class SquadService {
       type: 'squad',
       target: role.id,
       status: passed ? 'success' : 'failed',
-      message: `${role.name} 任务评分更新：${delta >= 0 ? '+' : ''}${delta}（基础 ${baseDelta >= 0 ? '+' : ''}${baseDelta}，奖励 +${rewardBonus}，当前 ${score}）`,
+      message: `${role.name} 自动评分更新：${delta >= 0 ? '+' : ''}${delta}（基础 ${baseDelta >= 0 ? '+' : ''}${baseDelta}，奖励 +${rewardBonus}，重复惩罚 -${repeatPenalty}，当前 ${score}）`,
       meta: {
         taskId: updatedTask.id,
         score,
@@ -2711,6 +2977,9 @@ class SquadService {
         baseDelta,
         rewardBonus,
         rewardReason: pickText(rewardDecision.reason),
+        repeatIssueKey: pickText(recurrence.issueKey),
+        repeatIssueCount: Math.max(0, Number(recurrence.repeatTaskCount) || 0),
+        repeatIssuePenalty: repeatPenalty,
         rewardStreak: patchedRole.rewardStreak,
         rewardPoints: patchedRole.rewardPoints,
         capabilityIndex: patchedRole.capabilityIndex,
@@ -2729,6 +2998,9 @@ class SquadService {
         scoreDeltaBase: baseDelta,
         rewardBonus,
         rewardReason: pickText(rewardDecision.reason),
+        repeatIssueKey: pickText(recurrence.issueKey),
+        repeatIssueCount: Math.max(0, Number(recurrence.repeatTaskCount) || 0),
+        repeatIssuePenalty: repeatPenalty,
         scoreDelta: delta
       },
       role: patchedRole,

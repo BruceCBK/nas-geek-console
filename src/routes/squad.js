@@ -1,16 +1,7 @@
 const express = require('express');
 const { sendSuccess } = require('../utils/response');
 const { asyncHandler } = require('../utils/async-handler');
-const { pickText } = require('../utils/text');
-
-function toBool(input, fallback = true) {
-  if (typeof input === 'boolean') return input;
-  const text = String(input || '').trim().toLowerCase();
-  if (!text) return fallback;
-  if (['1', 'true', 'yes', 'y', 'ok', 'pass', 'passed'].includes(text)) return true;
-  if (['0', 'false', 'no', 'n', 'fail', 'failed'].includes(text)) return false;
-  return fallback;
-}
+const { HttpError } = require('../utils/http-error');
 
 function createSquadRouter({ squadService }) {
   const router = express.Router();
@@ -41,17 +32,12 @@ function createSquadRouter({ squadService }) {
 
   router.post(
     '/task/:id/review',
-    asyncHandler(async (req, res) => {
-      const output = await squadService.reviewTask(req.params.id, {
-        completion: req.body?.completion,
-        quality: req.body?.quality,
-        ownerScore: req.body?.ownerScore,
-        captainScore: req.body?.captainScore,
-        passed: toBool(req.body?.passed, true),
-        reviewNote: req.body?.reviewNote
-      });
-
-      return sendSuccess(res, output, { legacy: output });
+    asyncHandler(async () => {
+      throw new HttpError(
+        410,
+        'SQUAD_REVIEW_MANUAL_DEPRECATED',
+        '手动任务评分已下线，系统改为自动评分与自动复盘。'
+      );
     })
   );
 
@@ -103,14 +89,15 @@ function createSquadRouter({ squadService }) {
 
   router.post(
     '/role/:id/reflection',
-    asyncHandler(async (req, res) => {
-      const role = await squadService.submitReflection(
-        req.params.id,
-        pickText(req.body?.reflection, req.body?.text)
+    asyncHandler(async () => {
+      throw new HttpError(
+        410,
+        'SQUAD_REFLECTION_MANUAL_DEPRECATED',
+        '低分自省手动提交已下线，系统会根据任务表现自动生成改进建议。'
       );
-      return sendSuccess(res, { role }, { legacy: { role } });
     })
   );
+
 
   return router;
 }
