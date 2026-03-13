@@ -335,6 +335,10 @@ async function main() {
     if (typeof reviewPayload?.role?.capabilityIndex !== 'number') {
       throw new Error('expected role.capabilityIndex in review payload');
     }
+    const finalReportStatus = String(reviewPayload?.finalReport?.status || '');
+    if (finalReportStatus !== 'blocked') {
+      throw new Error(`expected finalReport blocked before full collaboration chain, got ${finalReportStatus || '-'}`);
+    }
 
     const reflectionRoleId =
       linkedTasks.find((row) => row?.roleId === 'radar-qa')?.roleId || createdTask.roleId;

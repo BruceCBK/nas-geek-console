@@ -63,6 +63,14 @@ const ROLE_WORK_INTENT = {
   'doc-pulse': '结论沉淀与可读汇报'
 };
 
+const COLLAB_CHAIN_PHASES = [
+  { key: 'scout', label: '侦察', roleIds: ['neon-scout'] },
+  { key: 'implementation', label: '实现', roleIds: ['code-claw', 'ops-tide'] },
+  { key: 'validation_doc', label: '验证/文档', roleIds: ['radar-qa', 'doc-pulse'] }
+];
+const FINAL_REPORT_MAX_RETRY = 3;
+const FINAL_REPORT_RETRY_DELAY_MS = 1200;
+
 const PY311_REPORTER_SCRIPT = path.resolve(__dirname, '../../scripts/squad-reporting-py311.py');
 const PY311_REPORTER_CONFIG = path.resolve(__dirname, '../../config/squad-reporting.toml');
 const PY311_REPORTER_TIMEOUT_MS = Math.max(
@@ -400,7 +408,12 @@ function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], lo
     .map((role) => role.id);
 }
 
-function decideParallelRoleCount({ title = '', description = '', weight = 1 } = {}) {
+function decideParallelRoleCount({ title = '', description = '', weight = 1, source = '' } = {}) {
+  const sourceText = pickText(source).toLowerCase();
+  if (sourceText.startsWith('user')) {
+    return SQUAD_PARALLEL_MAX_ROLES;
+  }
+
   const merged = `${pickText(title)} ${pickText(description)}`.toLowerCase();
   const highComplexity = /(汇报|新闻|分析|排查|重构|联调|验收|优化|协作|复杂|investigate|analysis|refactor|regression|report|brief)/u.test(merged);
   const base = clamp((Number(weight) || 1) + 1, SQUAD_PARALLEL_MIN_ROLES, SQUAD_PARALLEL_MAX_ROLES);
@@ -414,10 +427,31 @@ function buildParallelRoleIds({ primaryRoleId, preferredRoleIds = [], allRoles =
   const fallback = toArray(allRoles)
     .map((row) => row?.id)
     .filter((id) => pickText(id) && id !== primaryRoleId);
-  const linkedRoleIds = Array.from(new Set([...toArray(preferredRoleIds), ...fallback]))
-    .filter((id) => id !== primaryRoleId)
-    .slice(0, Math.min(SQUAD_COLLAB_MAX_LINKED, targetLinked));
+  const candidates = Array.from(new Set([...toArray(preferredRoleIds), ...fallback])).filter((id) => id !== primaryRoleId);
 
+  const selected = [];
+  const currentRoleSet = new Set([primaryRoleId]);
+
+  for (const phase of COLLAB_CHAIN_PHASES) {
+    const phaseReady = Array.from(currentRoleSet).some((roleId) => phase.roleIds.includes(roleId));
+    if (phaseReady) continue;
+    const roleId = candidates.find((id) => phase.roleIds.includes(id) && !selected.includes(id));
+    if (roleId) {
+      selected.push(roleId);
+      currentRoleSet.add(roleId);
+    }
+    if (selected.length >= targetLinked) break;
+  }
+
+  for (const roleId of candidates) {
+    if (selected.length >= targetLinked) break;
+    if (!selected.includes(roleId)) {
+      selected.push(roleId);
+      currentRoleSet.add(roleId);
+    }
+  }
+
+  const linkedRoleIds = selected.slice(0, Math.min(SQUAD_COLLAB_MAX_LINKED, targetLinked));
   return {
     targetTotalRoles: maxRoles,
     linkedRoleIds,
@@ -538,6 +572,13 @@ function buildTaskRow({
     parallelRoleIds: Array.from(new Set(toArray(parallelRoleIds).map((id) => pickText(id)).filter(Boolean))),
     parallelRoleCount: Math.max(1, Number(parallelRoleCount) || toArray(parallelRoleIds).length || 1),
     coordinationMode: pickText(coordinationMode, 'parallel'),
+    finalReportStatus: relationType === 'primary' ? 'pending' : '',
+    finalReportAt: '',
+    finalReport: '',
+    finalReportAttempts: 0,
+    finalReportError: '',
+    finalReportMissingPhases: [],
+    finalReportChainReady: false,
     weight,
     status: 'running',
     progressPercent: 5,
@@ -704,6 +745,68 @@ function buildTaskGroupRosterMap(tasks = []) {
     rosterMap.set(gid, text);
   }
   return rosterMap;
+}
+
+function sleep(ms) {
+  const waitMs = Math.max(0, Number(ms) || 0);
+  return new Promise((resolve) => setTimeout(resolve, waitMs));
+}
+
+function summarizeChainPhases(groupTasks = []) {
+  const rows = toArray(groupTasks);
+  return COLLAB_CHAIN_PHASES.map((phase) => {
+    const related = rows.filter((task) => phase.roleIds.includes(pickText(task?.roleId)));
+    const completed = related.filter((task) => pickText(task?.status).toLowerCase() === 'completed');
+    return {
+      key: phase.key,
+      label: phase.label,
+      ready: completed.length > 0,
+      totalCount: related.length,
+      completedCount: completed.length,
+      completedTaskIds: completed.map((task) => pickText(task?.id)).filter(Boolean)
+    };
+  });
+}
+
+function renderChainSummary(phaseRows = []) {
+  return toArray(phaseRows)
+    .map((row) => `${pickText(row?.label)}:${row?.ready ? '完成' : '缺失'}(${Number(row?.completedCount) || 0}/${Number(row?.totalCount) || 0})`)
+    .join('｜');
+}
+
+function resolvePrimaryTaskInGroup(groupTasks = [], hintTask = {}) {
+  const rows = toArray(groupTasks);
+  if (!rows.length) return null;
+
+  const hintSource = pickText(hintTask?.sourceTaskId, hintTask?.parentTaskId);
+  if (hintSource) {
+    const byHint = rows.find((task) => pickText(task?.id) === hintSource);
+    if (byHint) return byHint;
+  }
+
+  const explicitPrimary = rows.find((task) => pickText(task?.relationType, 'primary').toLowerCase() === 'primary');
+  if (explicitPrimary) return explicitPrimary;
+
+  return rows[0] || null;
+}
+
+function buildFinalReportText({ primaryTask = {}, groupTasks = [], phaseRows = [] } = {}) {
+  const title = pickText(primaryTask?.displayTitle, primaryTask?.title, primaryTask?.id, '未命名任务');
+  const sourceLabel = taskSourceLabel(primaryTask);
+  const chain = renderChainSummary(phaseRows);
+  const completedRows = toArray(groupTasks).filter((task) => pickText(task?.status).toLowerCase() === 'completed');
+  const roleSummary = completedRows
+    .map((task) => `${pickText(task?.roleName, task?.roleId, '-')}: ${pickText(task?.reviewNote, task?.progressNote, '已完成')}`)
+    .slice(0, 6)
+    .join('；');
+
+  return [
+    `最终汇报｜${title}`,
+    `来源：${sourceLabel}`,
+    `协作链路：${chain}`,
+    `执行结论：${pickText(primaryTask?.reviewNote, primaryTask?.progressNote, '任务已完成')}`,
+    `角色产出：${pickText(roleSummary, '暂无角色产出摘要')}`
+  ].join('\n');
 }
 
 function toCstDateKey(now = new Date()) {
@@ -908,10 +1011,11 @@ function runPy311Reporter(input = {}, options = {}) {
 }
 
 class SquadService {
-  constructor(roleStore, taskStore, logService) {
+  constructor(roleStore, taskStore, logService, openclawService = null) {
     this.roleStore = roleStore;
     this.taskStore = taskStore;
     this.logService = logService;
+    this.openclawService = openclawService;
     this.maxTasks = 1000;
     this.executorTickMs = EXECUTOR_TICK_MS;
     this.executorEnabled = true;
@@ -1689,6 +1793,257 @@ class SquadService {
     }
   }
 
+  async _probeAgentCallable() {
+    if (!this.openclawService) {
+      return {
+        callable: true,
+        serviceState: 'unknown',
+        gatewayState: 'unknown',
+        reason: 'openclaw-service-not-bound'
+      };
+    }
+
+    try {
+      const [serviceStatus, gatewayStatus] = await Promise.all([
+        this.openclawService.getServiceStatus?.().catch(() => null),
+        this.openclawService.getGatewayStatus?.().catch(() => null)
+      ]);
+
+      const serviceState = pickText(serviceStatus?.friendlyState?.stateCode, serviceStatus?.detail?.activeState, 'unknown').toLowerCase();
+      const gatewayState = pickText(gatewayStatus?.stateCode, 'unknown').toLowerCase();
+      const serviceOk = ['running', 'active', 'ok', 'unknown'].includes(serviceState);
+      const gatewayOk = ['running', 'active', 'ok', 'unknown'].includes(gatewayState);
+
+      return {
+        callable: serviceOk && gatewayOk,
+        serviceState,
+        gatewayState,
+        reason: serviceOk && gatewayOk ? 'ok' : `service=${serviceState}, gateway=${gatewayState}`
+      };
+    } catch (error) {
+      return {
+        callable: false,
+        serviceState: 'error',
+        gatewayState: 'error',
+        reason: pickText(error?.message, String(error))
+      };
+    }
+  }
+
+  async _persistPrimaryFinalReport(primaryTaskId, patch = {}) {
+    let updated = null;
+    await this.taskStore.update((rows) => {
+      const list = toArray(rows);
+      const idx = list.findIndex((task) => task && task.id === primaryTaskId);
+      if (idx < 0) return list;
+      updated = {
+        ...list[idx],
+        ...patch
+      };
+      list[idx] = updated;
+      return list;
+    });
+    return updated;
+  }
+
+  async _maybeFinalizeGroupReportByTaskId(taskId, options = {}) {
+    const id = pickText(taskId);
+    if (!id) return { status: 'skip', reason: 'missing-task-id' };
+
+    const source = pickText(options?.source, 'review');
+    const force = options?.force === true;
+
+    const taskRows = toArray(await this.taskStore.read());
+    const triggerTask = taskRows.find((task) => task && task.id === id);
+    if (!triggerTask) return { status: 'skip', reason: 'task-not-found' };
+
+    const taskGroupId = pickText(triggerTask?.taskGroupId);
+    if (!taskGroupId) return { status: 'skip', reason: 'task-group-missing' };
+
+    const groupTasks = taskRows.filter((task) => pickText(task?.taskGroupId) === taskGroupId);
+    const primaryTask = resolvePrimaryTaskInGroup(groupTasks, triggerTask);
+    if (!primaryTask) return { status: 'skip', reason: 'primary-not-found' };
+
+    const primaryStatus = pickText(primaryTask?.status).toLowerCase();
+    if (primaryStatus !== 'completed') {
+      return {
+        status: 'blocked',
+        reason: `primary-status-${primaryStatus || 'unknown'}`,
+        taskId: primaryTask.id,
+        taskGroupId
+      };
+    }
+
+    if (!force && pickText(primaryTask?.finalReportStatus).toLowerCase() === 'success') {
+      return { status: 'skip', reason: 'already-reported' };
+    }
+
+    const phaseRows = summarizeChainPhases(groupTasks);
+    const missing = phaseRows.filter((row) => !row.ready).map((row) => row.label);
+
+    if (missing.length > 0) {
+      const blockedReason = `协作链路未完成：缺少 ${missing.join('、')}`;
+      await this._persistPrimaryFinalReport(primaryTask.id, {
+        finalReportStatus: 'blocked',
+        finalReportAt: '',
+        finalReport: '',
+        finalReportAttempts: 0,
+        finalReportError: blockedReason,
+        finalReportMissingPhases: missing,
+        finalReportChainReady: false,
+        updatedAt: nowIso()
+      });
+
+      await this.logService.append({
+        action: 'squad.final_report.blocked',
+        type: 'squad',
+        target: primaryTask.roleId,
+        status: 'failed',
+        message: `最终汇报阻塞：${blockedReason}`,
+        meta: {
+          taskId: primaryTask.id,
+          taskGroupId,
+          source,
+          missingPhases: missing
+        }
+      });
+
+      return {
+        status: 'blocked',
+        taskId: primaryTask.id,
+        taskGroupId,
+        missingPhases: missing,
+        chainSummary: renderChainSummary(phaseRows)
+      };
+    }
+
+    const probeLogs = [];
+    let callable = false;
+    let callableProbe = null;
+
+    for (let attempt = 1; attempt <= FINAL_REPORT_MAX_RETRY; attempt += 1) {
+      const probe = await this._probeAgentCallable();
+      callableProbe = probe;
+      probeLogs.push({ attempt, ...probe });
+      if (probe.callable) {
+        callable = true;
+        break;
+      }
+
+      await this.logService.append({
+        action: 'squad.final_report.retry',
+        type: 'squad',
+        target: primaryTask.roleId,
+        status: 'failed',
+        message: `最终汇报第 ${attempt} 次重试：AI agent 当前不可用`,
+        meta: {
+          taskId: primaryTask.id,
+          taskGroupId,
+          source,
+          attempt,
+          reason: pickText(probe.reason),
+          serviceState: pickText(probe.serviceState),
+          gatewayState: pickText(probe.gatewayState)
+        }
+      });
+
+      if (attempt < FINAL_REPORT_MAX_RETRY) {
+        await sleep(FINAL_REPORT_RETRY_DELAY_MS * attempt);
+      }
+    }
+
+    if (!callable) {
+      const errMessage = `AI agent 不可用，已重试 ${FINAL_REPORT_MAX_RETRY} 次：${pickText(callableProbe?.reason, 'unknown')}`;
+      await this._persistPrimaryFinalReport(primaryTask.id, {
+        finalReportStatus: 'unavailable',
+        finalReportAt: '',
+        finalReport: '',
+        finalReportAttempts: probeLogs.length,
+        finalReportError: errMessage,
+        finalReportMissingPhases: [],
+        finalReportChainReady: true,
+        updatedAt: nowIso()
+      });
+
+      await this.logService.append({
+        action: 'squad.final_report.unavailable',
+        type: 'squad',
+        target: primaryTask.roleId,
+        status: 'failed',
+        message: errMessage,
+        meta: {
+          taskId: primaryTask.id,
+          taskGroupId,
+          source,
+          retries: probeLogs
+        }
+      });
+
+      return {
+        status: 'unavailable',
+        taskId: primaryTask.id,
+        taskGroupId,
+        attempts: probeLogs.length,
+        error: errMessage,
+        chainSummary: renderChainSummary(phaseRows)
+      };
+    }
+
+    const finalReport = buildFinalReportText({
+      primaryTask,
+      groupTasks,
+      phaseRows
+    });
+
+    const reportTs = nowIso();
+    await this._persistPrimaryFinalReport(primaryTask.id, {
+      finalReportStatus: 'success',
+      finalReportAt: reportTs,
+      finalReport,
+      finalReportAttempts: probeLogs.length,
+      finalReportError: '',
+      finalReportMissingPhases: [],
+      finalReportChainReady: true,
+      updatedAt: reportTs
+    });
+
+    await this.logService.append({
+      action: 'squad.final_report.success',
+      type: 'squad',
+      target: primaryTask.roleId,
+      status: 'success',
+      message: `最终汇报已产出：${pickText(primaryTask.title, primaryTask.id)}`,
+      meta: {
+        taskId: primaryTask.id,
+        taskGroupId,
+        source,
+        attempts: probeLogs.length,
+        chainSummary: renderChainSummary(phaseRows),
+        finalReport
+      }
+    });
+
+    return {
+      status: 'success',
+      taskId: primaryTask.id,
+      taskGroupId,
+      attempts: probeLogs.length,
+      finalReport,
+      finalReportAt: reportTs,
+      chainSummary: renderChainSummary(phaseRows)
+    };
+  }
+
+  async retryFinalReport(taskId, options = {}) {
+    const id = pickText(taskId);
+    if (!id) throw new HttpError(400, 'SQUAD_TASK_ID_REQUIRED', 'taskId 不能为空');
+
+    return this._maybeFinalizeGroupReportByTaskId(id, {
+      force: true,
+      source: pickText(options?.source, 'manual.retry')
+    });
+  }
+
   async createTask(input = {}) {
     const title = pickText(input.title);
     const requestedRoleId = pickText(input.roleId);
@@ -1710,7 +2065,7 @@ class SquadService {
     const role = assignment.role;
 
     const taskGroupId = crypto.randomUUID();
-    const targetParallelRoles = decideParallelRoleCount({ title, description, weight });
+    const targetParallelRoles = decideParallelRoleCount({ title, description, weight, source });
     const parallelPlan = buildParallelRoleIds({
       primaryRoleId: role.id,
       preferredRoleIds: assignment.collaborationRoleIds,
@@ -1973,6 +2328,10 @@ class SquadService {
       }
     });
 
+    const finalReport = await this._maybeFinalizeGroupReportByTaskId(updatedTask.id, {
+      source: 'review'
+    });
+
     this._invalidateReportingCache();
     return {
       task: {
@@ -1982,7 +2341,8 @@ class SquadService {
         rewardReason: pickText(rewardDecision.reason),
         scoreDelta: delta
       },
-      role: patchedRole
+      role: patchedRole,
+      finalReport
     };
   }
 

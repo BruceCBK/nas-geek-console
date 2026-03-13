@@ -56,6 +56,16 @@ function createSquadRouter({ squadService }) {
   );
 
   router.post(
+    '/task/:id/final-report/retry',
+    asyncHandler(async (req, res) => {
+      const payload = await squadService.retryFinalReport(req.params.id, {
+        source: req.body?.source
+      });
+      return sendSuccess(res, payload, { legacy: payload });
+    })
+  );
+
+  router.post(
     '/task/:id/heartbeat',
     asyncHandler(async (req, res) => {
       const task = await squadService.heartbeatTask(req.params.id, {

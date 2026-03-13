@@ -1918,6 +1918,31 @@ function renderSquadTasks() {
     runtime.textContent = runtimeParts.join('｜');
     item.append(runtime);
 
+    if (pickText(task.relationType, 'primary').toLowerCase() === 'primary') {
+      const reportStatus = pickText(task.finalReportStatus, 'pending');
+      const reportLine = document.createElement('small');
+      const missingPhases = toArray(task.finalReportMissingPhases).join('、');
+      const baseText = `最终汇报状态：${reportStatus}`;
+      if (reportStatus === 'success') {
+        reportLine.textContent = `${baseText}｜时间 ${formatTime(task.finalReportAt)}`;
+      } else if (reportStatus === 'blocked') {
+        reportLine.className = 'warning-text';
+        reportLine.textContent = `${baseText}｜缺失链路：${pickText(missingPhases, task.finalReportError, '-')}`;
+      } else if (reportStatus === 'unavailable') {
+        reportLine.className = 'warning-text';
+        reportLine.textContent = `${baseText}｜已重试 ${formatNumber(task.finalReportAttempts)} 次｜${pickText(task.finalReportError, 'AI agent 暂不可用')}`;
+      } else {
+        reportLine.textContent = `${baseText}｜等待协作链路闭环`;
+      }
+      item.append(reportLine);
+
+      if (pickText(task.finalReport)) {
+        const reportText = document.createElement('small');
+        reportText.textContent = `最终汇报：${pickText(task.finalReport)}`;
+        item.append(reportText);
+      }
+    }
+
     if (['running', 'blocked', 'pending'].includes(taskStatus)) {
       const actions = document.createElement('div');
       actions.className = 'row';
@@ -1937,6 +1962,20 @@ function renderSquadTasks() {
 
       actions.append(heartbeatBtn, useForReviewBtn);
       item.append(actions);
+    }
+
+    const isPrimary = pickText(task.relationType, 'primary').toLowerCase() === 'primary';
+    const finalStatus = pickText(task.finalReportStatus).toLowerCase();
+    if (isPrimary && ['completed', 'failed'].includes(taskStatus) && finalStatus !== 'success') {
+      const retryWrap = document.createElement('div');
+      retryWrap.className = 'row';
+      const retryBtn = document.createElement('button');
+      retryBtn.textContent = '重试最终汇报';
+      retryBtn.addEventListener('click', () => {
+        retrySquadFinalReport(task).catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+      });
+      retryWrap.append(retryBtn);
+      item.append(retryWrap);
     }
 
     dom.squadTaskBoard.appendChild(item);
@@ -2044,7 +2083,8 @@ async function createSquadTask() {
         title,
         roleId,
         description,
-        weight
+        weight,
+        source: 'user.command'
       }
     });
 
@@ -2095,6 +2135,38 @@ async function reportSquadTaskHeartbeat(task) {
   setMessage(dom.squadMsg, `已上报心跳：${pickText(task.title)} -> ${formatNumber(progressPercent)}%`, 'success');
 }
 
+async function retrySquadFinalReport(task) {
+  const taskId = pickText(task?.id);
+  if (!taskId) {
+    setMessage(dom.squadMsg, '任务ID缺失，无法重试最终汇报', 'error');
+    return;
+  }
+
+  setMessage(dom.squadMsg, '正在重试最终汇报...', 'info', 0);
+  const payload = await apiJson(`/api/squad/task/${encodeURIComponent(taskId)}/final-report/retry`, {
+    method: 'POST',
+    body: { source: 'ui.retry' }
+  });
+
+  await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
+
+  const status = pickText(payload?.status, 'unknown');
+  if (status === 'success') {
+    setMessage(dom.squadMsg, '最终汇报已生成并写入任务大厅', 'success');
+    return;
+  }
+  if (status === 'blocked') {
+    setMessage(dom.squadMsg, `最终汇报仍被阻塞：${toArray(payload?.missingPhases).join('、') || pickText(payload?.reason, '-')}`, 'error');
+    return;
+  }
+  if (status === 'unavailable') {
+    setMessage(dom.squadMsg, `AI agent 不可用：已重试 ${formatNumber(payload?.attempts)} 次`, 'error');
+    return;
+  }
+
+  setMessage(dom.squadMsg, `最终汇报重试状态：${status}`, 'info');
+}
+
 async function submitSquadReview() {
   const taskId = pickText(dom.squadReviewTaskIdInput?.value);
   if (!taskId) {
@@ -2125,7 +2197,9 @@ async function submitSquadReview() {
 
     await Promise.allSettled([loadSquadState({ keepPage: true }), loadDashboardSummary()]);
     const roleName = pickText(payload.role?.name, payload.role?.codename, '角色');
-    setMessage(dom.squadMsg, `评分完成：${roleName} 当前 ${formatNumber(payload.role?.score)} 分`, 'success');
+    const finalReportState = pickText(payload?.finalReport?.status);
+    const extra = finalReportState ? `｜最终汇报：${finalReportState}` : '';
+    setMessage(dom.squadMsg, `评分完成：${roleName} 当前 ${formatNumber(payload.role?.score)} 分${extra}`, 'success');
   });
 }
 

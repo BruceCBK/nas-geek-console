@@ -80,7 +80,7 @@ function createServices() {
   const memoryService = new MemoryService(memoryIndexStore);
   const contentService = new ContentService(favoritesStore, topicsStore);
   const mediaService = new MediaService();
-  const squadService = new SquadService(squadRoleStore, squadTaskStore, logService);
+  const squadService = new SquadService(squadRoleStore, squadTaskStore, logService, openclawService);
 
   return {
     authService,
