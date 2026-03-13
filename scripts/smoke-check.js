@@ -199,6 +199,24 @@ async function main() {
     }
   });
 
+  await check('POST /api/squad/reporting/sync-memory dryRun', async () => {
+    const res = await request('/api/squad/reporting/sync-memory', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ source: 'smoke', dryRun: true, force: true, maxItems: 4 })
+    });
+    if (res.status !== 200) {
+      throw new Error(`expected 200, got ${res.status}`);
+    }
+    const data = getData(res.body);
+    if (typeof data?.dailyMemoryPath !== 'string' || !data.dailyMemoryPath.endsWith('.md')) {
+      throw new Error('expected dailyMemoryPath markdown path');
+    }
+    if (!data?.reporting || typeof data.reporting.liveBrief !== 'string') {
+      throw new Error('expected reporting snapshot in sync-memory response');
+    }
+  });
+
   await check('POST /api/squad/task auto-route(code) + review + reflection', async () => {
     const stateRes = await request('/api/squad/state', { headers: authHeaders() });
     const stateData = getData(stateRes.body);

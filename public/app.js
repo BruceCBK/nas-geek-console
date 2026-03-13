@@ -60,6 +60,7 @@ const dom = {
   skillsOpsText: document.getElementById('skillsOpsText'),
 
   squadRefreshBtn: document.getElementById('squadRefreshBtn'),
+  squadSyncMemoryBtn: document.getElementById('squadSyncMemoryBtn'),
   squadRoleBoard: document.getElementById('squadRoleBoard'),
   squadLeaderboard: document.getElementById('squadLeaderboard'),
   squadTaskBoard: document.getElementById('squadTaskBoard'),
@@ -269,6 +270,9 @@ function wireEvents() {
 
   dom.squadRefreshBtn?.addEventListener('click', () => {
     loadSquadState().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
+  });
+  dom.squadSyncMemoryBtn?.addEventListener('click', () => {
+    syncSquadReportingMemory().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
   });
   dom.squadCreateTaskBtn?.addEventListener('click', () => {
     createSquadTask().catch((err) => setMessage(dom.squadMsg, err.message, 'error'));
@@ -1503,7 +1507,8 @@ function renderSquadRoles() {
 
   const reporting = state.squad.reporting || {};
   const alertRows = toArray(reporting.alerts).slice(0, 4).map((item) => pickText(item)).filter(Boolean);
-  const memoryRows = toArray(reporting.memoryTips).slice(0, 3).map((item) => pickText(item)).filter(Boolean);
+  const digestRows = toArray(reporting.memoryDigest?.dailyBullets).map((item) => pickText(item)).filter(Boolean);
+  const memoryRows = (digestRows.length ? digestRows : toArray(reporting.memoryTips)).slice(0, 3).map((item) => pickText(item)).filter(Boolean);
   if (pickText(reporting.liveBrief) || alertRows.length || memoryRows.length) {
     const reportItem = document.createElement('div');
     reportItem.className = 'list-item';
@@ -1795,6 +1800,34 @@ function renderSquadRoleSelectors() {
       dom.squadReflectionRoleSelect.value = roles[0].id;
     }
   }
+}
+
+async function syncSquadReportingMemory() {
+  await withButtons([dom.squadSyncMemoryBtn], async () => {
+    setMessage(dom.squadMsg, '记忆同步中...', 'info', 0);
+    const payload = await apiJson('/api/squad/reporting/sync-memory', {
+      method: 'POST',
+      body: {
+        source: 'ui.manual'
+      }
+    });
+
+    await Promise.allSettled([loadSquadState(), loadDashboardSummary()]);
+
+    const dedup = payload?.dedupHit === true;
+    const dailyPath = pickText(payload?.dailyMemoryPath, '-');
+    const archivePath = pickText(payload?.blockedArchivePath);
+    const wroteDaily = Number(payload?.wrote?.daily) || 0;
+    const wroteBlocked = Number(payload?.wrote?.blocked) || 0;
+    const archiveText = archivePath ? `；阻塞归档 ${archivePath}` : '';
+
+    if (dedup) {
+      setMessage(dom.squadMsg, `记忆同步命中去重：${dailyPath}${archiveText}`, 'info');
+      return;
+    }
+
+    setMessage(dom.squadMsg, `记忆已同步：${dailyPath}（写入 ${wroteDaily} 行，阻塞 ${wroteBlocked} 条）${archiveText}`, 'success');
+  });
 }
 
 async function createSquadTask() {

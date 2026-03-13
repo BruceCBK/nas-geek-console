@@ -1,8 +1,10 @@
 const crypto = require('crypto');
 const path = require('path');
 const { existsSync } = require('fs');
+const fs = require('fs/promises');
 const { spawn } = require('child_process');
 const { HttpError } = require('../utils/http-error');
+const { MEMORY_DIR } = require('../config/paths');
 const { nowIso, pickText, toArray } = require('../utils/text');
 
 const BASE_SCORE = 100;
@@ -61,6 +63,16 @@ const SQUAD_REPORT_CACHE_MS = Math.max(
   4000,
   Number.parseInt(process.env.SQUAD_REPORT_CACHE_MS || '12000', 10) || 12000
 );
+
+const SQUAD_MEMORY_SYNC_DEDUP_MS = Math.max(
+  60 * 1000,
+  Number.parseInt(process.env.SQUAD_MEMORY_SYNC_DEDUP_MS || String(10 * 60 * 1000), 10) || 10 * 60 * 1000
+);
+const SQUAD_MEMORY_SYNC_MAX_ITEMS = Math.max(
+  2,
+  Number.parseInt(process.env.SQUAD_MEMORY_SYNC_MAX_ITEMS || '6', 10) || 6
+);
+const SQUAD_BLOCKED_ARCHIVE_DIR = path.join(MEMORY_DIR, 'cards', 'squad-blocked');
 
 const DEFAULT_ROLES = [
   {
@@ -519,6 +531,93 @@ function parseIsoMs(input) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+function toCstDateKey(now = new Date()) {
+  const shifted = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  return shifted.toISOString().slice(0, 10);
+}
+
+function formatCstClock(now = new Date()) {
+  return now.toLocaleString('zh-CN', {
+    hour12: false,
+    timeZone: 'Asia/Shanghai'
+  });
+}
+
+function toRelativeMemoryPath(absPath) {
+  return path.relative(MEMORY_DIR, absPath).split(path.sep).join('/');
+}
+
+function normalizeReportingPayload(input = {}) {
+  return {
+    engine: pickText(input?.engine, 'unknown'),
+    generatedAt: pickText(input?.generatedAt, nowIso()),
+    liveBrief: pickText(input?.liveBrief),
+    alerts: toArray(input?.alerts).map((item) => pickText(item)).filter(Boolean),
+    memoryTips: toArray(input?.memoryTips).map((item) => pickText(item)).filter(Boolean),
+    memoryDigest: {
+      dailyBullets: toArray(input?.memoryDigest?.dailyBullets).map((item) => pickText(item)).filter(Boolean),
+      blockedBullets: toArray(input?.memoryDigest?.blockedBullets).map((item) => pickText(item)).filter(Boolean)
+    },
+    errors: toArray(input?.errors).map((item) => pickText(item)).filter(Boolean)
+  };
+}
+
+function makeMemorySyncFingerprint({ reporting = {}, blockedTasks = [] } = {}) {
+  const seed = JSON.stringify({
+    engine: reporting?.engine,
+    liveBrief: reporting?.liveBrief,
+    alerts: toArray(reporting?.alerts).slice(0, SQUAD_MEMORY_SYNC_MAX_ITEMS),
+    memoryTips: toArray(reporting?.memoryTips).slice(0, SQUAD_MEMORY_SYNC_MAX_ITEMS),
+    blockedIds: toArray(blockedTasks).map((task) => pickText(task?.id)).slice(0, SQUAD_MEMORY_SYNC_MAX_ITEMS)
+  });
+  return crypto.createHash('sha1').update(seed).digest('hex');
+}
+
+function buildDailyMemorySection({ reporting = {}, blockedTasks = [], nowText = nowIso(), source = 'manual' } = {}) {
+  const alerts = toArray(reporting?.alerts).slice(0, SQUAD_MEMORY_SYNC_MAX_ITEMS);
+  const tips = toArray(reporting?.memoryDigest?.dailyBullets).length
+    ? toArray(reporting?.memoryDigest?.dailyBullets).slice(0, SQUAD_MEMORY_SYNC_MAX_ITEMS)
+    : toArray(reporting?.memoryTips).slice(0, SQUAD_MEMORY_SYNC_MAX_ITEMS);
+
+  const lines = [
+    `- [squad-sync ${nowText}] source=${source}`,
+    `  - 实时播报: ${pickText(reporting?.liveBrief, '无')}`,
+    `  - 播报引擎: ${pickText(reporting?.engine, 'unknown')} @ ${pickText(reporting?.generatedAt, nowText)}`
+  ];
+
+  for (const row of alerts) {
+    lines.push(`  - 风险提醒: ${pickText(row)}`);
+  }
+
+  for (const row of tips) {
+    lines.push(`  - 记忆建议: ${pickText(row)}`);
+  }
+
+  if (blockedTasks.length) {
+    lines.push(`  - 阻塞任务数: ${blockedTasks.length}`);
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+function buildBlockedArchiveSection({ blockedTasks = [], causeLabels = {}, nowText = nowIso() } = {}) {
+  const list = toArray(blockedTasks).slice(0, SQUAD_MEMORY_SYNC_MAX_ITEMS);
+  if (!list.length) return '';
+
+  const lines = [`## ${nowText} 自动归档（blocked=${list.length}）`];
+  for (const task of list) {
+    const reasonCode = pickText(task?.blockedReasonCode, 'heartbeat_timeout');
+    const reasonLabel = pickText(causeLabels?.[reasonCode], reasonCode);
+    lines.push(`- ${pickText(task?.title, task?.id)} @ ${pickText(task?.roleName, task?.roleId, '-')}`);
+    lines.push(`  - 原因: ${reasonLabel}`);
+    lines.push(`  - 根因: ${pickText(task?.blockedRootCause, task?.stalledReason, '未提供')}`);
+    lines.push(`  - 建议: ${pickText(task?.recoveryHint, '补充进展心跳并拆分里程碑')}`);
+    lines.push(`  - 最近心跳: ${pickText(task?.lastHeartbeatAt, task?.createdAt, '-')}`);
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
 function buildJsFallbackReporting({ roles = [], tasks = [], executor = {}, reason = '' } = {}) {
   const blocked = toArray(tasks).filter((task) => pickText(task?.status).toLowerCase() === 'blocked');
   const atRisk = toArray(tasks).filter((task) => pickText(task?.runtimeRisk).toLowerCase() === 'at-risk');
@@ -557,6 +656,10 @@ function buildJsFallbackReporting({ roles = [], tasks = [], executor = {}, reaso
     liveBrief: `任务 ${toArray(tasks).length}｜进行中 ${running.length}｜风险 ${atRisk.length}｜阻塞 ${blocked.length}｜角色均分 ${avgScore}｜执行器 ${executor?.enabled ? 'ON' : 'OFF'}${fallbackReason}`,
     alerts,
     memoryTips,
+    memoryDigest: {
+      dailyBullets: memoryTips.slice(0, SQUAD_MEMORY_SYNC_MAX_ITEMS),
+      blockedBullets: alerts.filter((line) => String(line || '').startsWith('[BLOCKED]')).slice(0, Math.max(1, Math.floor(SQUAD_MEMORY_SYNC_MAX_ITEMS / 2)))
+    },
     errors: pickText(reason) ? [pickText(reason)] : []
   };
 }
@@ -652,6 +755,10 @@ class SquadService {
       atMs: 0,
       payload: null
     };
+    this.memorySyncCache = {
+      atMs: 0,
+      fingerprint: ''
+    };
   }
 
   _invalidateReportingCache() {
@@ -680,21 +787,16 @@ class SquadService {
     let snapshot = null;
     try {
       snapshot = await runPy311Reporter(input, { timeoutMs: PY311_REPORTER_TIMEOUT_MS });
-      snapshot = {
-        engine: pickText(snapshot?.engine, 'py311-taskgroup-v1'),
-        generatedAt: pickText(snapshot?.generatedAt, nowIso()),
-        liveBrief: pickText(snapshot?.liveBrief),
-        alerts: toArray(snapshot?.alerts).map((item) => pickText(item)).filter(Boolean),
-        memoryTips: toArray(snapshot?.memoryTips).map((item) => pickText(item)).filter(Boolean),
-        errors: toArray(snapshot?.errors).map((item) => pickText(item)).filter(Boolean)
-      };
+      snapshot = normalizeReportingPayload(snapshot);
     } catch (error) {
-      snapshot = buildJsFallbackReporting({
-        roles,
-        tasks,
-        executor,
-        reason: pickText(error?.message, String(error))
-      });
+      snapshot = normalizeReportingPayload(
+        buildJsFallbackReporting({
+          roles,
+          tasks,
+          executor,
+          reason: pickText(error?.message, String(error))
+        })
+      );
     }
 
     this.reportingCache = {
@@ -1169,6 +1271,110 @@ class SquadService {
         score: row.score,
         reflection: row.reflection
       }))
+    };
+  }
+
+  async syncReportingMemory(options = {}) {
+    const source = pickText(options?.source, 'manual');
+    const force = options?.force === true;
+    const dryRun = options?.dryRun === true;
+    const maxItems = clamp(options?.maxItems ?? options?.limit ?? SQUAD_MEMORY_SYNC_MAX_ITEMS, 2, 12);
+
+    const state = await this.getState();
+    const reporting = normalizeReportingPayload(state?.reporting || {});
+    const blockedTasks = toArray(state?.tasks)
+      .filter((task) => pickText(task?.status).toLowerCase() === 'blocked')
+      .slice(0, maxItems);
+
+    const fingerprint = makeMemorySyncFingerprint({ reporting, blockedTasks });
+    const nowMs = Date.now();
+    const dedupHit =
+      !force &&
+      this.memorySyncCache?.fingerprint === fingerprint &&
+      nowMs - Number(this.memorySyncCache?.atMs || 0) <= SQUAD_MEMORY_SYNC_DEDUP_MS;
+
+    const now = new Date();
+    const dayKey = toCstDateKey(now);
+    const nowText = nowIso();
+    const dailyPath = path.join(MEMORY_DIR, `${dayKey}.md`);
+    const blockedArchivePath = path.join(SQUAD_BLOCKED_ARCHIVE_DIR, `${dayKey}.md`);
+
+    const dailySection = buildDailyMemorySection({
+      reporting: {
+        ...reporting,
+        alerts: toArray(reporting?.alerts).slice(0, maxItems),
+        memoryTips: toArray(reporting?.memoryTips).slice(0, maxItems),
+        memoryDigest: {
+          dailyBullets: toArray(reporting?.memoryDigest?.dailyBullets).slice(0, maxItems),
+          blockedBullets: toArray(reporting?.memoryDigest?.blockedBullets).slice(0, Math.max(1, Math.floor(maxItems / 2)))
+        }
+      },
+      blockedTasks,
+      nowText,
+      source
+    });
+    const blockedSection = buildBlockedArchiveSection({
+      blockedTasks,
+      causeLabels: state?.causeLabels,
+      nowText
+    });
+
+    if (!dedupHit && !dryRun) {
+      await fs.mkdir(MEMORY_DIR, { recursive: true });
+      await fs.appendFile(dailyPath, dailySection, 'utf8');
+
+      if (blockedSection) {
+        await fs.mkdir(path.dirname(blockedArchivePath), { recursive: true });
+        await fs.appendFile(blockedArchivePath, blockedSection, 'utf8');
+      }
+    }
+
+    if (!dedupHit) {
+      this.memorySyncCache = {
+        atMs: nowMs,
+        fingerprint
+      };
+    }
+
+    await this.logService.append({
+      action: 'squad.reporting.sync_memory',
+      type: 'squad',
+      target: source,
+      status: dedupHit ? 'skipped' : 'success',
+      message: dedupHit
+        ? `记忆同步去重命中（${formatCstClock(now)}）`
+        : `记忆同步完成（${formatCstClock(now)}）`,
+      meta: {
+        source,
+        dryRun,
+        dedupHit,
+        force,
+        fingerprint: fingerprint.slice(0, 12),
+        blockedCount: blockedTasks.length,
+        engine: reporting?.engine
+      }
+    });
+
+    return {
+      syncedAt: nowText,
+      source,
+      dryRun,
+      dedupHit,
+      force,
+      fingerprint: fingerprint.slice(0, 12),
+      reporting: {
+        engine: reporting?.engine,
+        generatedAt: reporting?.generatedAt,
+        liveBrief: reporting?.liveBrief,
+        alerts: toArray(reporting?.alerts).slice(0, maxItems),
+        memoryTips: toArray(reporting?.memoryTips).slice(0, maxItems)
+      },
+      dailyMemoryPath: `${dayKey}.md`,
+      blockedArchivePath: blockedSection ? toRelativeMemoryPath(blockedArchivePath) : '',
+      wrote: {
+        daily: dedupHit || dryRun ? 0 : dailySection.split('\n').filter(Boolean).length,
+        blocked: dedupHit || dryRun || !blockedSection ? 0 : blockedTasks.length
+      }
     };
   }
 

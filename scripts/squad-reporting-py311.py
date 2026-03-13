@@ -154,12 +154,37 @@ async def build_memory_tips(payload: dict[str, Any], config: ReporterConfig, now
     return tips[: config.memory_tip_limit]
 
 
+async def build_memory_digest(alerts: list[str], memory_tips: list[str], config: ReporterConfig) -> dict[str, list[str]]:
+    daily: list[str] = []
+    blocked: list[str] = []
+
+    for tip in memory_tips[: config.memory_tip_limit]:
+        if tip and tip not in daily:
+            daily.append(str(tip))
+
+    for alert in alerts:
+        text = str(alert or "")
+        if not text:
+            continue
+        if text.startswith("[BLOCKED]"):
+            blocked.append(text)
+
+    if not daily and alerts:
+        daily.extend(str(item) for item in alerts[: min(2, len(alerts))])
+
+    return {
+        "dailyBullets": daily[: config.memory_tip_limit],
+        "blockedBullets": blocked[: max(1, config.memory_tip_limit // 2)],
+    }
+
+
 async def build_report(payload: dict[str, Any], config: ReporterConfig) -> dict[str, Any]:
     now = _now_utc()
 
     brief = ""
     alerts: list[str] = []
     memory_tips: list[str] = []
+    memory_digest: dict[str, list[str]] = {"dailyBullets": [], "blockedBullets": []}
     errors: list[str] = []
 
     try:
@@ -170,6 +195,7 @@ async def build_report(payload: dict[str, Any], config: ReporterConfig) -> dict[
         brief = t_brief.result()
         alerts = t_alert.result()
         memory_tips = t_memory.result()
+        memory_digest = await build_memory_digest(alerts, memory_tips, config)
     except* Exception as eg:
         errors.extend(str(exc) for exc in eg.exceptions)
 
@@ -184,6 +210,7 @@ async def build_report(payload: dict[str, Any], config: ReporterConfig) -> dict[
         "liveBrief": brief,
         "alerts": alerts,
         "memoryTips": memory_tips,
+        "memoryDigest": memory_digest,
         "errors": errors,
     }
 

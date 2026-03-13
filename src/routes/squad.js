@@ -68,6 +68,19 @@ function createSquadRouter({ squadService }) {
   );
 
   router.post(
+    '/reporting/sync-memory',
+    asyncHandler(async (req, res) => {
+      const payload = await squadService.syncReportingMemory({
+        source: req.body?.source,
+        force: req.body?.force === true,
+        dryRun: req.body?.dryRun === true,
+        maxItems: req.body?.maxItems
+      });
+      return sendSuccess(res, payload, { legacy: payload });
+    })
+  );
+
+  router.post(
     '/role/:id/reflection',
     asyncHandler(async (req, res) => {
       const role = await squadService.submitReflection(
