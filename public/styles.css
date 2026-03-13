@@ -819,3 +819,98 @@ textarea::placeholder {
   overflow-y: auto;
   padding-right: 4px;
 }
+
+.squad-overview-grid {
+  grid-template-columns: minmax(620px, 1.25fr) minmax(380px, 0.95fr);
+  align-items: start;
+}
+
+.squad-role-board {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding-right: 4px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(250px, 1fr));
+}
+
+.squad-role-board .board-meta {
+  grid-column: 1 / -1;
+}
+
+.squad-role-item {
+  display: grid;
+  gap: 8px;
+}
+
+.metric-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.metric-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 224, 255, 0.28);
+  background: rgba(8, 28, 44, 0.72);
+  color: #bfe8ff;
+  font-size: 12px;
+}
+
+.squad-leaderboard {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding-right: 4px;
+  gap: 10px;
+}
+
+.leaderboard-summary {
+  border-color: rgba(110, 247, 195, 0.38);
+  background: rgba(10, 30, 45, 0.78);
+}
+
+.leaderboard-item {
+  display: grid;
+  gap: 7px;
+}
+
+.leaderboard-item.top-tier {
+  border-color: rgba(110, 247, 195, 0.46);
+  box-shadow: inset 0 0 20px rgba(110, 247, 195, 0.08);
+}
+
+.score-track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(120, 224, 255, 0.18);
+}
+
+.score-track > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+@media (max-width: 1480px) {
+  .squad-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .squad-role-board,
+  .squad-leaderboard {
+    max-height: none;
+  }
+}
+
+@media (max-width: 1180px) {
+  .squad-role-board {
+    grid-template-columns: 1fr;
+  }
+}

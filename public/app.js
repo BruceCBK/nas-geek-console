@@ -1619,53 +1619,42 @@ function renderSquadRoles() {
     return;
   }
 
-  const executorItem = document.createElement('div');
-  executorItem.className = 'list-item';
-  const executorLine = document.createElement('small');
+  const appendMetaCard = (text, warning = '') => {
+    const item = document.createElement('div');
+    item.className = 'list-item board-meta';
+    const line = document.createElement('small');
+    line.textContent = text;
+    item.append(line);
+    if (pickText(warning)) {
+      const err = document.createElement('small');
+      err.className = 'warning-text';
+      err.textContent = warning;
+      item.append(err);
+    }
+    dom.squadRoleBoard.appendChild(item);
+  };
+
   const tickSec = Math.max(1, Math.round(Number(executor.tickMs || 0) / 1000));
-  executorLine.textContent = `执行器：${executor.enabled ? '已启用' : '未启用'}｜tick ${tickSec}s｜最近心跳 ${formatTime(executor.lastTickAt)}｜自动闭环 ${formatNumber(executor.stats?.autoCompleted)} 次`;
-  executorItem.append(executorLine);
-  dom.squadRoleBoard.appendChild(executorItem);
+  appendMetaCard(`执行器：${executor.enabled ? '已启用' : '未启用'}｜tick ${tickSec}s｜最近心跳 ${formatTime(executor.lastTickAt)}｜自动闭环 ${formatNumber(executor.stats?.autoCompleted)} 次`);
 
   const memorySync = state.squad.memorySync || {};
-  const memoryItem = document.createElement('div');
-  memoryItem.className = 'list-item';
-  const memoryLine = document.createElement('small');
   const memoryTickSec = Math.max(1, Math.round(Number(memorySync.intervalMs || 0) / 1000));
-  memoryLine.textContent = `记忆同步器：${memorySync.enabled ? '已启用' : '未启用'}｜tick ${memoryTickSec}s｜最近同步 ${formatTime(memorySync.lastSyncAt)}｜结果 ${pickText(memorySync.lastResult, '-')}｜成功 ${formatNumber(memorySync.stats?.synced)} 次 / 跳过 ${formatNumber(memorySync.stats?.skipped)} 次`;
-  memoryItem.append(memoryLine);
-  if (pickText(memorySync.lastError)) {
-    const memoryErr = document.createElement('small');
-    memoryErr.className = 'warning-text';
-    memoryErr.textContent = `同步器异常：${pickText(memorySync.lastError)}`;
-    memoryItem.append(memoryErr);
-  }
-  dom.squadRoleBoard.appendChild(memoryItem);
+  appendMetaCard(
+    `记忆同步器：${memorySync.enabled ? '已启用' : '未启用'}｜tick ${memoryTickSec}s｜最近同步 ${formatTime(memorySync.lastSyncAt)}｜结果 ${pickText(memorySync.lastResult, '-')}｜成功 ${formatNumber(memorySync.stats?.synced)} 次 / 跳过 ${formatNumber(memorySync.stats?.skipped)} 次`,
+    pickText(memorySync.lastError) ? `同步器异常：${pickText(memorySync.lastError)}` : ''
+  );
 
   const commandBridge = state.squad.commandBridge || {};
-  const bridgeItem = document.createElement('div');
-  bridgeItem.className = 'list-item';
-  const bridgeLine = document.createElement('small');
   const bridgeTick = Math.max(1, Math.round(Number(commandBridge.tickMs || 0) / 1000));
-  bridgeLine.textContent = `指令桥接器：${commandBridge.enabled ? '已启用' : '未启用'}｜tick ${bridgeTick}s｜最近同步 ${formatTime(commandBridge.lastSyncAt)}｜已拆分 ${formatNumber(commandBridge.stats?.createdGroups)} 组 / 更新 ${formatNumber(commandBridge.stats?.syncedTasks)} 条`;
-  bridgeItem.append(bridgeLine);
-  if (pickText(commandBridge.lastError)) {
-    const bridgeErr = document.createElement('small');
-    bridgeErr.className = 'warning-text';
-    bridgeErr.textContent = `桥接器异常：${pickText(commandBridge.lastError)}`;
-    bridgeItem.append(bridgeErr);
-  }
-  dom.squadRoleBoard.appendChild(bridgeItem);
+  appendMetaCard(
+    `指令桥接器：${commandBridge.enabled ? '已启用' : '未启用'}｜tick ${bridgeTick}s｜最近同步 ${formatTime(commandBridge.lastSyncAt)}｜已拆分 ${formatNumber(commandBridge.stats?.createdGroups)} 组 / 更新 ${formatNumber(commandBridge.stats?.syncedTasks)} 条`,
+    pickText(commandBridge.lastError) ? `桥接器异常：${pickText(commandBridge.lastError)}` : ''
+  );
 
   const hiddenSynthetic = Number(state.squad.summary?.hiddenSyntheticTasks || 0);
   const hiddenStaleBridge = Number(state.squad.summary?.hiddenStaleBridgeTasks || 0);
   if (hiddenSynthetic > 0 || hiddenStaleBridge > 0) {
-    const hiddenItem = document.createElement('div');
-    hiddenItem.className = 'list-item';
-    const hiddenLine = document.createElement('small');
-    hiddenLine.textContent = `已隐藏 ${formatNumber(hiddenSynthetic)} 条系统测试任务，归档 ${formatNumber(hiddenStaleBridge)} 条历史桥接任务，避免任务大厅失真`;
-    hiddenItem.append(hiddenLine);
-    dom.squadRoleBoard.appendChild(hiddenItem);
+    appendMetaCard(`已隐藏 ${formatNumber(hiddenSynthetic)} 条系统测试任务，归档 ${formatNumber(hiddenStaleBridge)} 条历史桥接任务，避免任务大厅失真`);
   }
 
   const reporting = state.squad.reporting || {};
@@ -1674,21 +1663,19 @@ function renderSquadRoles() {
   const memoryRows = (digestRows.length ? digestRows : toArray(reporting.memoryTips)).slice(0, 3).map((item) => pickText(item)).filter(Boolean);
   if (pickText(reporting.liveBrief) || alertRows.length || memoryRows.length) {
     const reportItem = document.createElement('div');
-    reportItem.className = 'list-item';
+    reportItem.className = 'list-item board-meta';
 
     if (pickText(reporting.liveBrief)) {
       const brief = document.createElement('small');
       brief.textContent = `实时播报：${pickText(reporting.liveBrief)}`;
       reportItem.append(brief);
     }
-
     if (alertRows.length) {
       const alert = document.createElement('small');
       alert.className = 'warning-text';
       alert.textContent = `风险提醒：${alertRows.join(' ｜ ')}`;
       reportItem.append(alert);
     }
-
     if (memoryRows.length) {
       const memo = document.createElement('small');
       memo.textContent = `记忆建议：${memoryRows.join(' ｜ ')}`;
@@ -1698,13 +1685,12 @@ function renderSquadRoles() {
     const engine = document.createElement('small');
     engine.textContent = `播报引擎：${pickText(reporting.engine, 'unknown')} · ${formatTime(reporting.generatedAt)}`;
     reportItem.append(engine);
-
     dom.squadRoleBoard.appendChild(reportItem);
   }
 
   roles.forEach((role) => {
     const item = document.createElement('div');
-    item.className = 'list-item ripple-surface';
+    item.className = 'list-item ripple-surface squad-role-item';
 
     const line = document.createElement('div');
     line.className = 'list-line';
@@ -1716,21 +1702,30 @@ function renderSquadRoles() {
     const status = pickText(role.status, blockedCount > 0 || Number(role.score) < 60 ? 'warning' : 'active').toLowerCase();
     const badge = buildBadge(status);
 
-    const pressureCount = Number(role.blockedPressure24h) || 0;
-    const pressureMul = Number(role.blockedPenaltyMultiplier) || 1;
-    const rewardStreak = Number(role.rewardStreak) || 0;
-    const bestRewardStreak = Number(role.bestRewardStreak) || 0;
-    const rewardPoints = Number(role.rewardPoints) || 0;
-    const capabilityIndex = Number(role.capabilityIndex) || 0;
+    line.append(title, badge);
+    item.append(line);
 
-    const meta = document.createElement('small');
-    meta.textContent = `${pickText(role.specialty)} · 评分 ${formatNumber(role.score)} · 能力指数 ${formatNumber(capabilityIndex)} · 历史失败 ${formatNumber(role.failureEvents)} · 连胜 ${formatNumber(rewardStreak)}(最高${formatNumber(bestRewardStreak)}) · 奖励积分 ${formatNumber(rewardPoints)} · 24h阻塞压力 ${formatNumber(pressureCount)} · 惩罚倍率 x${pressureMul.toFixed(2)}`;
+    const chips = document.createElement('div');
+    chips.className = 'metric-chips';
+    const chipRows = [
+      `评分 ${formatNumber(role.score)}`,
+      `能力指数 ${formatNumber(role.capabilityIndex)}`,
+      `连胜 ${formatNumber(role.rewardStreak)}(峰值${formatNumber(role.bestRewardStreak)})`,
+      `奖励积分 ${formatNumber(role.rewardPoints)}`,
+      `24h阻塞 ${formatNumber(role.blockedPressure24h)}`,
+      `惩罚 x${(Number(role.blockedPenaltyMultiplier) || 1).toFixed(2)}`
+    ];
+    chipRows.forEach((entry) => {
+      const chip = document.createElement('span');
+      chip.className = 'metric-chip';
+      chip.textContent = entry;
+      chips.append(chip);
+    });
+    item.append(chips);
 
     const stat = document.createElement('small');
-    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜风险中 ${formatNumber(role.atRiskTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
-
-    line.append(title, badge);
-    item.append(line, meta, stat);
+    stat.textContent = `任务 ${formatNumber(role.totalTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜风险 ${formatNumber(role.atRiskTasks)}｜阻塞 ${formatNumber(role.blockedTasks)}｜完成 ${formatNumber(role.doneTasks)}｜失败 ${formatNumber(role.failedTasks)}｜完成度 ${formatNumber(role.avgCompletion)}｜质量 ${formatNumber(role.avgQuality)}`;
+    item.append(stat);
 
     if (status === 'warning') {
       const warn = document.createElement('small');
@@ -1739,7 +1734,7 @@ function renderSquadRoles() {
       const topCauseLabel = pickText(causeLabels[topCause], topCause, '-');
       warn.textContent =
         blockedCount > 0
-          ? `⚠ 当前有 ${formatNumber(blockedCount)} 条阻塞任务（主因：${topCauseLabel}）：${pickText(role.reflection, '请立即排障并补充进度心跳')}`
+          ? `⚠ 当前阻塞 ${formatNumber(blockedCount)} 条（主因：${topCauseLabel}）：${pickText(role.reflection, '请立即排障并补充进度心跳')}`
           : `⚠ 低于60分：${pickText(role.reflection, '需提交自省与改进计划')}`;
       item.append(warn);
     }
@@ -1769,24 +1764,52 @@ function renderSquadLeaderboard() {
     return;
   }
 
+  const topScore = Number(roles[0]?.score || 0);
+  const tailScore = Number(roles[roles.length - 1]?.score || 0);
+  const avgScore = roles.reduce((sum, role) => sum + Number(role.score || 0), 0) / Math.max(1, roles.length);
+
+  const summary = document.createElement('div');
+  summary.className = 'list-item leaderboard-summary';
+  summary.innerHTML = `
+    <small>团队均分：${formatNumber(avgScore)}｜最高分：${formatNumber(topScore)}｜分差：${formatNumber(topScore - tailScore)}</small>
+    <small class="warning-text">提示：优先关注低于60分或阻塞任务多的角色，避免整体协作掉速</small>
+  `;
+  dom.squadLeaderboard.appendChild(summary);
+
   roles.forEach((role, idx) => {
     const item = document.createElement('div');
-    item.className = 'list-item ripple-surface';
+    item.className = 'list-item ripple-surface leaderboard-item';
+    if (idx < 3) item.classList.add('top-tier');
 
     const line = document.createElement('div');
     line.className = 'list-line';
 
+    const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🏅';
     const title = document.createElement('strong');
-    title.textContent = `#${idx + 1} ${pickText(role.name)}`;
+    title.textContent = `${medal} #${idx + 1} ${pickText(role.name)}`;
 
     const badge = buildBadge(Number(role.score) < 60 ? 'warning' : 'ok');
     badge.textContent = `${formatNumber(role.score)}分`;
 
-    const meta = document.createElement('small');
-    meta.textContent = `${pickText(role.codename)} · ${pickText(role.vibe)}`;
-
     line.append(title, badge);
-    item.append(line, meta);
+    item.append(line);
+
+    const meta = document.createElement('small');
+    meta.textContent = `${pickText(role.codename)} · ${pickText(role.vibe)} · 成长 ${pickText(role.growthFocus, '-')}`;
+    item.append(meta);
+
+    const progress = document.createElement('div');
+    progress.className = 'score-track';
+    const bar = document.createElement('span');
+    const safeScore = Math.max(0, Math.min(100, Number(role.score) || 0));
+    bar.style.width = `${safeScore}%`;
+    progress.append(bar);
+    item.append(progress);
+
+    const detail = document.createElement('small');
+    detail.textContent = `完成 ${formatNumber(role.doneTasks)}｜进行中 ${formatNumber(role.pendingTasks)}｜质量 ${formatNumber(role.avgQuality)}｜能力指数 ${formatNumber(role.capabilityIndex)}`;
+    item.append(detail);
+
     dom.squadLeaderboard.appendChild(item);
   });
 
@@ -1794,6 +1817,7 @@ function renderSquadLeaderboard() {
 }
 
 function renderSquadTasks() {
+
   if (!dom.squadTaskBoard) return;
   dom.squadTaskBoard.innerHTML = '';
 
