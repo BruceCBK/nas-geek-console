@@ -252,7 +252,8 @@ async function main() {
         title: 'fix login bug in code path',
         description: 'dev refactor to fix regression',
         roleId: 'auto',
-        weight: 1
+        weight: 1,
+        source: 'system.smoke'
       })
     });
     if (createRes.status !== 200) {
@@ -283,17 +284,11 @@ async function main() {
     }
     const afterCreateState = getData(afterCreateStateRes.body) || {};
     const listedTaskIds = Array.isArray(afterCreateState?.tasks) ? afterCreateState.tasks.map((row) => row?.id) : [];
-    if (!listedTaskIds.includes(taskId)) {
-      throw new Error('expected newly created task to appear in squad task board payload');
+    if (listedTaskIds.includes(taskId)) {
+      throw new Error('expected synthetic smoke task to be hidden from squad task board payload');
     }
-    const createdStateTask = Array.isArray(afterCreateState?.tasks)
-      ? afterCreateState.tasks.find((row) => row?.id === taskId)
-      : null;
-    if (!createdStateTask?.sourceLabel || !String(createdStateTask.sourceLabel).includes('用户')) {
-      throw new Error('expected created task sourceLabel to indicate user-dispatched');
-    }
-    if (typeof createdStateTask?.roleAction !== 'string' || createdStateTask.roleAction.length < 4) {
-      throw new Error('expected created task roleAction summary');
+    if (Number(afterCreateState?.summary?.hiddenSyntheticTasks || 0) < 1) {
+      throw new Error('expected hiddenSyntheticTasks >= 1 after synthetic task creation');
     }
 
     const heartbeatRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/heartbeat`, {

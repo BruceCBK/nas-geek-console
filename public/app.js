@@ -1640,6 +1640,16 @@ function renderSquadRoles() {
   }
   dom.squadRoleBoard.appendChild(memoryItem);
 
+  const hiddenSynthetic = Number(state.squad.summary?.hiddenSyntheticTasks || 0);
+  if (hiddenSynthetic > 0) {
+    const hiddenItem = document.createElement('div');
+    hiddenItem.className = 'list-item';
+    const hiddenLine = document.createElement('small');
+    hiddenLine.textContent = `已自动隐藏 ${formatNumber(hiddenSynthetic)} 条系统测试任务，避免误导任务大厅`; 
+    hiddenItem.append(hiddenLine);
+    dom.squadRoleBoard.appendChild(hiddenItem);
+  }
+
   const reporting = state.squad.reporting || {};
   const alertRows = toArray(reporting.alerts).slice(0, 4).map((item) => pickText(item)).filter(Boolean);
   const digestRows = toArray(reporting.memoryDigest?.dailyBullets).map((item) => pickText(item)).filter(Boolean);

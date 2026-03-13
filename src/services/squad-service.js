@@ -90,6 +90,11 @@ const SQUAD_STATE_TASK_MAX = Math.max(
   Number.parseInt(process.env.SQUAD_STATE_TASK_MAX || '240', 10) || 240
 );
 
+const SQUAD_COLLAB_MAX_LINKED = Math.max(
+  1,
+  Number.parseInt(process.env.SQUAD_COLLAB_MAX_LINKED || '4', 10) || 4
+);
+
 const DEFAULT_ROLES = [
   {
     id: 'neon-scout',
@@ -371,8 +376,11 @@ function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], lo
   const matchedSecondary = scoredRows
     .filter((row) => row?.role?.id && row.role.id !== primaryRoleId)
     .map((row) => row.role.id);
+  const allSecondary = toArray(roles)
+    .map((row) => row?.id)
+    .filter((id) => pickText(id) && id !== primaryRoleId);
 
-  const unique = Array.from(new Set([...matchedSecondary, ...policyRoles]));
+  const unique = Array.from(new Set([...matchedSecondary, ...policyRoles, ...allSecondary]));
   if (!unique.length) return [];
 
   const roleMap = new Map(toArray(roles).map((r) => [r.id, r]));
@@ -386,7 +394,7 @@ function pickCollaborationRoles({ primaryRoleId, scoredRows = [], roles = [], lo
       if (left.total !== right.total) return left.total - right.total;
       return pickText(a.id).localeCompare(pickText(b.id));
     })
-    .slice(0, 3)
+    .slice(0, SQUAD_COLLAB_MAX_LINKED)
     .map((role) => role.id);
 }
 
@@ -603,9 +611,22 @@ function inferTaskSemanticTitle(task = {}) {
   return '通用执行任务';
 }
 
+function isSyntheticSmokeTask(task = {}) {
+  const source = pickText(task?.dispatchSource).toLowerCase();
+  if (source.includes('system.smoke')) return true;
+
+  const cleanTitle = stripLinkedPrefix(task?.title).toLowerCase();
+  const desc = pickText(task?.description).toLowerCase();
+  if (cleanTitle === 'fix login bug in code path' && desc.includes('dev refactor to fix regression')) return true;
+  if (cleanTitle.includes('smoke squad task')) return true;
+  if (cleanTitle === 'score-cap-test') return true;
+  return cleanTitle.includes('smoke') && desc.includes('smoke');
+}
+
 function taskSourceLabel(task = {}) {
   const source = pickText(task?.dispatchSource).toLowerCase();
   const relation = pickText(task?.relationType, 'primary').toLowerCase();
+  if (source.includes('system.smoke') || isSyntheticSmokeTask(task)) return '系统测试任务';
   if (source.startsWith('user')) return '用户主派发';
   if (source.startsWith('derived') || relation === 'linked') return '协同衍生任务';
   if (source.startsWith('system')) return '系统自动派发';
@@ -1423,16 +1444,20 @@ class SquadService {
       .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
 
     const warningRoles = sortedRoles.filter((r) => pickText(r.status, '').toLowerCase() === 'warning');
+    const syntheticTasks = taskRows.filter((task) => isSyntheticSmokeTask(task));
+    const visibleTaskRows = taskRows.filter((task) => !isSyntheticSmokeTask(task));
+
     const summary = {
       totalRoles: sortedRoles.length,
       avgScore: Math.round(avg(sortedRoles.map((r) => Number(r.score) || 0))),
       warningRoles: warningRoles.length,
-      totalTasks: taskRows.length,
-      completedTasks: taskRows.filter((t) => t.status === 'completed').length,
-      failedTasks: taskRows.filter((t) => t.status === 'failed' || t.status === 'blocked').length,
-      blockedTasks: taskRows.filter((t) => t.status === 'blocked').length,
-      atRiskTasks: taskRows.filter((t) => pickText(t.runtimeRisk).toLowerCase() === 'at-risk').length,
-      pendingTasks: taskRows.filter((t) => TASK_OPEN_STATUSES.has(pickText(t.status).toLowerCase())).length
+      totalTasks: visibleTaskRows.length,
+      completedTasks: visibleTaskRows.filter((t) => t.status === 'completed').length,
+      failedTasks: visibleTaskRows.filter((t) => t.status === 'failed' || t.status === 'blocked').length,
+      blockedTasks: visibleTaskRows.filter((t) => t.status === 'blocked').length,
+      atRiskTasks: visibleTaskRows.filter((t) => pickText(t.runtimeRisk).toLowerCase() === 'at-risk').length,
+      pendingTasks: visibleTaskRows.filter((t) => TASK_OPEN_STATUSES.has(pickText(t.status).toLowerCase())).length,
+      hiddenSyntheticTasks: syntheticTasks.length
     };
 
     const executor = {
@@ -1445,16 +1470,16 @@ class SquadService {
     const causeLabels = { ...CAUSE_LABELS };
     const reporting = await this._buildReportingSnapshot({
       roles: sortedRoles,
-      tasks: taskRows,
+      tasks: visibleTaskRows,
       summary,
       executor,
       causeLabels
     });
 
-    const groupRosterMap = buildTaskGroupRosterMap(taskRows);
-    const boardTasks = taskRows
+    const groupRosterMap = buildTaskGroupRosterMap(visibleTaskRows);
+    const boardTasks = visibleTaskRows
       .slice()
-      .sort((a, b) => taskRecencyMs(b) - taskRecencyMs(a))
+       .sort((a, b) => taskRecencyMs(b) - taskRecencyMs(a))
       .slice(0, SQUAD_STATE_TASK_MAX)
       .map((task) => {
         const sourceTaskId = pickText(task?.sourceTaskId, task?.parentTaskId);
@@ -1633,6 +1658,7 @@ class SquadService {
     const requestedRoleId = pickText(input.roleId);
     const description = pickText(input.description);
     const weight = clamp(input.weight, 1, 3);
+    const source = pickText(input.source, 'user.primary');
 
     if (!title) throw new HttpError(400, 'SQUAD_TASK_TITLE_REQUIRED', '任务标题不能为空');
     await this._reconcileTaskLiveness();
@@ -1657,7 +1683,7 @@ class SquadService {
       assignmentReason: `${assignment.assignmentReason} ｜ ${CAPTAIN_DISPATCH_DOCTRINE}`,
       taskGroupId,
       relationType: 'primary',
-      dispatchSource: 'user.primary'
+      dispatchSource: source
     });
 
     const linkedTasks = assignment.collaborationRoleIds
@@ -1678,7 +1704,7 @@ class SquadService {
           taskGroupId,
           parentTaskId: task.id,
           relationType: 'linked',
-          dispatchSource: 'derived.linked',
+          dispatchSource: source.includes('system.smoke') ? 'system.smoke.linked' : 'derived.linked',
           sourceTaskId: task.id
         });
       });

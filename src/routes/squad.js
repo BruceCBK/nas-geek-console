@@ -30,7 +30,8 @@ function createSquadRouter({ squadService }) {
         title: req.body?.title,
         description: req.body?.description,
         roleId: req.body?.roleId,
-        weight: req.body?.weight
+        weight: req.body?.weight,
+        source: req.body?.source
       });
 
       const payload = output && output.task ? output : { task: output, linkedTasks: [] };
