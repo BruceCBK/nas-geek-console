@@ -1271,6 +1271,24 @@ class SquadService {
     };
   }
 
+  async _syncCommandBridgeOnDemand() {
+    if (!this.commandBridgeEnabled) return;
+    if (this.commandBridgeTickRunning) return;
+
+    const now = Date.now();
+    const lastMs = Math.max(parseIsoMs(this.commandBridgeLastSyncAt), parseIsoMs(this.commandBridgeLastTickAt), 0);
+    if (lastMs > 0 && now - lastMs < this.commandBridgeTickMs) {
+      return;
+    }
+
+    try {
+      await this._commandBridgeTick();
+    } catch (error) {
+      this.commandBridgeLastError = pickText(error?.message, String(error));
+      this.commandBridgeStats.failed += 1;
+    }
+  }
+
   _startCommandBridgeLoop() {
     if (!this.commandBridgeEnabled || this.commandBridgeTimer) return;
 
@@ -1826,6 +1844,7 @@ class SquadService {
   }
 
   async getState() {
+    await this._syncCommandBridgeOnDemand();
     await this._reconcileTaskLiveness();
     const [roles, tasks] = await Promise.all([this.roleStore.read(), this.taskStore.read()]);
     const roleRows = toArray(roles);

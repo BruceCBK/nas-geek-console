@@ -2358,7 +2358,15 @@ function buildRoleAvatar(role = {}, className = 'role-avatar') {
   fallback.className = `${className} avatar-fallback`;
   fallback.textContent = fallbackMap[pickText(role.id)] || '🦞';
 
-  const src = pickText(role.avatar);
+  const defaultAvatarMap = {
+    'neon-scout': '/avatars/roles/neon-scout.svg',
+    'code-claw': '/avatars/roles/code-claw.svg',
+    'radar-qa': '/avatars/roles/radar-qa.svg',
+    'ops-tide': '/avatars/roles/ops-tide.svg',
+    'doc-pulse': '/avatars/roles/doc-pulse.svg'
+  };
+
+  const src = pickText(role.avatar, defaultAvatarMap[pickText(role.id)]);
   if (src) {
     avatar.src = src;
     avatar.addEventListener('error', () => {

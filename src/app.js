@@ -28,6 +28,13 @@ async function createApp() {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '25mb' }));
+  app.use((req, res, next) => {
+    if (req.path.endsWith('.js') || req.path.endsWith('.css') || req.path.includes('/avatars/roles/')) {
+      res.setHeader('Cache-Control', 'no-store, max-age=0');
+    }
+    next();
+  });
+
   app.use(express.static(PUBLIC_DIR));
 
   const services = createServices();
