@@ -203,6 +203,12 @@ async function main() {
     if (typeof data?.memorySync?.enabled !== 'boolean') {
       throw new Error('expected squad memorySync enabled flag');
     }
+    if (!data?.commandBridge || typeof data.commandBridge !== 'object') {
+      throw new Error('expected squad commandBridge metadata');
+    }
+    if (typeof data?.commandBridge?.enabled !== 'boolean') {
+      throw new Error('expected squad commandBridge enabled flag');
+    }
   });
 
   await check('POST /api/squad/reporting/sync-memory dryRun', async () => {

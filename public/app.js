@@ -128,6 +128,7 @@ const state = {
     causeLabels: {},
     reporting: {},
     memorySync: {},
+    commandBridge: {},
     pager: {
       page: 1,
       pageSize: 25,
@@ -1580,6 +1581,7 @@ async function loadSquadState(options = {}) {
     causeLabels: asObject(payload.causeLabels),
     reporting: asObject(payload.reporting),
     memorySync: asObject(payload.memorySync),
+    commandBridge: asObject(payload.commandBridge),
     pager: {
       page: nextPage,
       pageSize,
@@ -1640,12 +1642,28 @@ function renderSquadRoles() {
   }
   dom.squadRoleBoard.appendChild(memoryItem);
 
+  const commandBridge = state.squad.commandBridge || {};
+  const bridgeItem = document.createElement('div');
+  bridgeItem.className = 'list-item';
+  const bridgeLine = document.createElement('small');
+  const bridgeTick = Math.max(1, Math.round(Number(commandBridge.tickMs || 0) / 1000));
+  bridgeLine.textContent = `指令桥接器：${commandBridge.enabled ? '已启用' : '未启用'}｜tick ${bridgeTick}s｜最近同步 ${formatTime(commandBridge.lastSyncAt)}｜已拆分 ${formatNumber(commandBridge.stats?.createdGroups)} 组 / 更新 ${formatNumber(commandBridge.stats?.syncedTasks)} 条`;
+  bridgeItem.append(bridgeLine);
+  if (pickText(commandBridge.lastError)) {
+    const bridgeErr = document.createElement('small');
+    bridgeErr.className = 'warning-text';
+    bridgeErr.textContent = `桥接器异常：${pickText(commandBridge.lastError)}`;
+    bridgeItem.append(bridgeErr);
+  }
+  dom.squadRoleBoard.appendChild(bridgeItem);
+
   const hiddenSynthetic = Number(state.squad.summary?.hiddenSyntheticTasks || 0);
-  if (hiddenSynthetic > 0) {
+  const hiddenStaleBridge = Number(state.squad.summary?.hiddenStaleBridgeTasks || 0);
+  if (hiddenSynthetic > 0 || hiddenStaleBridge > 0) {
     const hiddenItem = document.createElement('div');
     hiddenItem.className = 'list-item';
     const hiddenLine = document.createElement('small');
-    hiddenLine.textContent = `已自动隐藏 ${formatNumber(hiddenSynthetic)} 条系统测试任务，避免误导任务大厅`; 
+    hiddenLine.textContent = `已隐藏 ${formatNumber(hiddenSynthetic)} 条系统测试任务，归档 ${formatNumber(hiddenStaleBridge)} 条历史桥接任务，避免任务大厅失真`;
     hiddenItem.append(hiddenLine);
     dom.squadRoleBoard.appendChild(hiddenItem);
   }

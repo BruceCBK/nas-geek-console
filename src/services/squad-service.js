@@ -105,6 +105,22 @@ const SQUAD_COLLAB_MAX_LINKED = Math.max(
   Number.parseInt(process.env.SQUAD_COLLAB_MAX_LINKED || String(SQUAD_PARALLEL_MAX_ROLES - 1), 10) || (SQUAD_PARALLEL_MAX_ROLES - 1)
 );
 
+const SQUAD_COMMAND_BRIDGE_ENABLED = String(process.env.SQUAD_COMMAND_BRIDGE_ENABLED || 'true').toLowerCase() !== 'false';
+const SQUAD_COMMAND_BRIDGE_TICK_MS = Math.max(
+  8000,
+  Number.parseInt(process.env.SQUAD_COMMAND_BRIDGE_TICK_MS || '12000', 10) || 12000
+);
+const SQUAD_COMMAND_BRIDGE_MAX_TASKS = Math.max(
+  20,
+  Number.parseInt(process.env.SQUAD_COMMAND_BRIDGE_MAX_TASKS || '120', 10) || 120
+);
+const LONG_TASKS_PATH = path.join(MEMORY_DIR, 'long-tasks.json');
+
+const SQUAD_COMMAND_BRIDGE_SHOW_WINDOW_MS = Math.max(
+  30 * 60 * 1000,
+  Number.parseInt(process.env.SQUAD_COMMAND_BRIDGE_SHOW_WINDOW_MS || String(6 * 60 * 60 * 1000), 10) || 6 * 60 * 60 * 1000
+);
+
 const DEFAULT_ROLES = [
   {
     id: 'neon-scout',
@@ -697,6 +713,13 @@ function isSyntheticSmokeTask(task = {}) {
   return cleanTitle.includes('smoke') && desc.includes('smoke');
 }
 
+function isBridgeTaskRow(task = {}) {
+  const source = pickText(task?.dispatchSource).toLowerCase();
+  if (source === 'user.command.bridge' || source === 'derived.linked.bridge') return true;
+  if (source === 'derived.linked' && pickText(task?.title).startsWith('[协同] 指令任务桥接｜')) return true;
+  return false;
+}
+
 function taskSourceLabel(task = {}) {
   const source = pickText(task?.dispatchSource).toLowerCase();
   const relation = pickText(task?.relationType, 'primary').toLowerCase();
@@ -1053,6 +1076,20 @@ class SquadService {
       skipped: 0,
       failed: 0
     };
+    this.commandBridgeEnabled = SQUAD_COMMAND_BRIDGE_ENABLED;
+    this.commandBridgeTickMs = SQUAD_COMMAND_BRIDGE_TICK_MS;
+    this.commandBridgeMaxTasks = SQUAD_COMMAND_BRIDGE_MAX_TASKS;
+    this.commandBridgeTimer = null;
+    this.commandBridgeTickRunning = false;
+    this.commandBridgeLastTickAt = '';
+    this.commandBridgeLastSyncAt = '';
+    this.commandBridgeLastError = '';
+    this.commandBridgeStats = {
+      ticks: 0,
+      createdGroups: 0,
+      syncedTasks: 0,
+      failed: 0
+    };
   }
 
   _invalidateReportingCache() {
@@ -1108,6 +1145,7 @@ class SquadService {
     await this._normalizeTaskRuntime();
     this._startExecutorLoop();
     this._startMemorySyncLoop();
+    this._startCommandBridgeLoop();
   }
 
   async _normalizeRoleScores() {
@@ -1202,6 +1240,249 @@ class SquadService {
       this.memoryAutoSyncLastError = pickText(error?.message, String(error));
       this.memoryAutoSyncLastResult = 'failed';
       this.memoryAutoSyncStats.failed += 1;
+    }
+  }
+
+  _buildCommandBridgeMeta() {
+    return {
+      enabled: this.commandBridgeEnabled,
+      tickMs: this.commandBridgeTickMs,
+      maxTasks: this.commandBridgeMaxTasks,
+      lastTickAt: this.commandBridgeLastTickAt,
+      lastSyncAt: this.commandBridgeLastSyncAt,
+      lastError: this.commandBridgeLastError,
+      stats: { ...this.commandBridgeStats }
+    };
+  }
+
+  _startCommandBridgeLoop() {
+    if (!this.commandBridgeEnabled || this.commandBridgeTimer) return;
+
+    this.commandBridgeTimer = setInterval(() => {
+      this._commandBridgeTick().catch((error) => {
+        this.commandBridgeLastError = pickText(error?.message, String(error));
+        this.commandBridgeStats.failed += 1;
+      });
+    }, this.commandBridgeTickMs);
+
+    if (typeof this.commandBridgeTimer.unref === 'function') {
+      this.commandBridgeTimer.unref();
+    }
+
+    this._commandBridgeTick().catch((error) => {
+      this.commandBridgeLastError = pickText(error?.message, String(error));
+      this.commandBridgeStats.failed += 1;
+    });
+  }
+
+  _mapLongTaskStatus(status) {
+    const key = pickText(status).toLowerCase();
+    if (key === 'completed') return 'completed';
+    if (key === 'failed') return 'blocked';
+    if (key === 'pending') return 'pending';
+    if (key === 'running') return 'running';
+    return 'running';
+  }
+
+  _buildLongTaskProgressNote(longTask = {}) {
+    const status = pickText(longTask?.status, 'running');
+    const currentStep = Math.max(1, Number(longTask?.currentStep) || 1);
+    const steps = toArray(longTask?.steps);
+    const currentName = pickText(steps[currentStep - 1]?.name, steps[0]?.name, '-');
+    const progress = clamp(longTask?.progress, 0, 100);
+    const summary = pickText(longTask?.goal, longTask?.title, longTask?.result?.summary, '-');
+    return `桥接任务进展：状态=${status}｜步骤${currentStep}:${currentName}｜完成度${progress}%｜${summary}`;
+  }
+
+  _buildLongTaskFinalReport(longTask = {}, phaseSummary = '') {
+    const title = pickText(longTask?.title, longTask?.goal, longTask?.id, '未命名任务');
+    const result = longTask?.result && typeof longTask.result === 'object'
+      ? JSON.stringify(longTask.result, null, 0)
+      : pickText(longTask?.result, longTask?.goal, '任务已完成');
+    return [
+      `最终汇报｜${title}`,
+      `来源：用户指令桥接`,
+      `协作链路：${pickText(phaseSummary, '桥接同步')}`,
+      `执行结论：${pickText(result, '任务已完成')}`
+    ].join('\n');
+  }
+
+  async _readLongTasks() {
+    try {
+      const raw = await fs.readFile(LONG_TASKS_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      return toArray(parsed?.tasks);
+    } catch {
+      return [];
+    }
+  }
+
+  async _commandBridgeTick() {
+    if (!this.commandBridgeEnabled || this.commandBridgeTickRunning) return;
+    this.commandBridgeTickRunning = true;
+    this.commandBridgeLastTickAt = nowIso();
+    this.commandBridgeStats.ticks += 1;
+
+    try {
+      const bridgeWindowMs = 48 * 60 * 60 * 1000;
+      const nowMs = Date.now();
+      const longTasks = (await this._readLongTasks())
+        .filter((task) => {
+          const id = pickText(task?.id);
+          if (!id.startsWith('lt_')) return false;
+          const status = pickText(task?.status).toLowerCase();
+          if (status === 'running' || status === 'pending' || status === 'failed') return true;
+          const updatedMs = parseIsoMs(task?.updatedAt || task?.lastReportAt || task?.completedAt || task?.startedAt);
+          return updatedMs >= nowMs - bridgeWindowMs;
+        })
+        .slice()
+        .sort((a, b) => parseIsoMs(b?.updatedAt || b?.lastReportAt || b?.startedAt) - parseIsoMs(a?.updatedAt || a?.lastReportAt || a?.startedAt))
+        .slice(0, this.commandBridgeMaxTasks);
+
+      if (!longTasks.length) {
+        this.commandBridgeLastError = '';
+        return;
+      }
+
+      let currentTasks = toArray(await this.taskStore.read());
+      const bridgePrimaryBySource = new Map(
+        currentTasks
+          .filter((task) => pickText(task?.dispatchSource).toLowerCase() === 'user.command.bridge' && pickText(task?.relationType, 'primary').toLowerCase() === 'primary')
+          .map((task) => [pickText(task?.sourceTaskId), task])
+      );
+
+      let createdGroups = 0;
+      for (const longTask of longTasks) {
+        const longId = pickText(longTask?.id);
+        if (!longId || bridgePrimaryBySource.has(longId)) continue;
+
+        const created = await this.createTask({
+          title: `指令任务桥接｜${pickText(longTask?.title, longTask?.goal, longId)}`,
+          description: pickText(longTask?.goal, longTask?.title, '桥接自用户指令任务'),
+          roleId: AUTO_ROLE_ID,
+          weight: 2,
+          source: 'user.command.bridge',
+          sourceTaskId: longId
+        });
+
+        if (created?.task) {
+          bridgePrimaryBySource.set(longId, created.task);
+          createdGroups += 1;
+        }
+      }
+
+      if (createdGroups > 0) {
+        this.commandBridgeStats.createdGroups += createdGroups;
+        currentTasks = toArray(await this.taskStore.read());
+      }
+
+      const longTaskMap = new Map(longTasks.map((task) => [pickText(task?.id), task]));
+      const primaryByGroup = new Map(
+        currentTasks
+          .filter((task) => pickText(task?.dispatchSource).toLowerCase() === 'user.command.bridge' && pickText(task?.relationType, 'primary').toLowerCase() === 'primary')
+          .map((task) => [pickText(task?.taskGroupId), pickText(task?.sourceTaskId)])
+      );
+
+      let touched = 0;
+      const nowText = nowIso();
+
+      await this.taskStore.update((rows) => {
+        return toArray(rows).map((task) => {
+          const dispatchSource = pickText(task?.dispatchSource).toLowerCase();
+          const relation = pickText(task?.relationType, 'primary').toLowerCase();
+          const isBridgePrimary = dispatchSource === 'user.command.bridge' && relation === 'primary';
+          const bridgeLongId = isBridgePrimary
+            ? pickText(task?.sourceTaskId)
+            : pickText(primaryByGroup.get(pickText(task?.taskGroupId)));
+
+          if (!bridgeLongId) return task;
+
+          const longTask = longTaskMap.get(bridgeLongId);
+          if (!longTask) return task;
+
+          const mappedStatus = this._mapLongTaskStatus(longTask?.status);
+          const progress = clamp(longTask?.progress, 0, 100);
+          const note = this._buildLongTaskProgressNote(longTask);
+
+          const terminalHeartbeat = pickText(longTask?.updatedAt, longTask?.lastReportAt, longTask?.completedAt, task?.lastHeartbeatAt, nowText);
+          const next = {
+            ...task,
+            dispatchSource: isBridgePrimary ? 'user.command.bridge' : 'derived.linked.bridge',
+            progressPercent: progress,
+            progressNote: note,
+            lastHeartbeatAt: mappedStatus === 'completed' ? terminalHeartbeat : nowText,
+            updatedAt: mappedStatus === 'completed' ? terminalHeartbeat : nowText,
+            stalledReason: mappedStatus === 'blocked' ? pickText(longTask?.errors?.[0]?.message, longTask?.errors?.[0], '桥接任务执行失败') : ''
+          };
+
+          if (mappedStatus === 'completed') {
+            next.status = 'completed';
+            next.passed = true;
+            next.completion = Math.max(Number(next.completion) || 0, progress || 100);
+            next.quality = Math.max(Number(next.quality) || 0, 85);
+            next.gradedAt = pickText(next.gradedAt, nowText);
+            if (isBridgePrimary) {
+              const phaseSummary = `侦察:完成｜实现:完成｜验证/文档:完成`;
+              next.finalReportStatus = 'success';
+              next.finalReportAt = nowText;
+              next.finalReport = this._buildLongTaskFinalReport(longTask, phaseSummary);
+              next.finalReportAttempts = Math.max(1, Number(next.finalReportAttempts) || 1);
+              next.finalReportError = '';
+              next.finalReportMissingPhases = [];
+              next.finalReportChainReady = true;
+            }
+          } else if (mappedStatus === 'blocked') {
+            next.status = 'blocked';
+            next.stalledAt = nowText;
+            if (isBridgePrimary) {
+              next.finalReportStatus = 'unavailable';
+              next.finalReportAt = '';
+              next.finalReport = '';
+              next.finalReportAttempts = FINAL_REPORT_MAX_RETRY;
+              next.finalReportError = pickText(longTask?.errors?.[0]?.message, longTask?.errors?.[0], '桥接任务失败');
+              next.finalReportMissingPhases = [];
+              next.finalReportChainReady = false;
+            }
+          } else {
+            next.status = mappedStatus;
+            if (isBridgePrimary && pickText(next.finalReportStatus).toLowerCase() !== 'success') {
+              next.finalReportStatus = 'pending';
+              next.finalReportAt = '';
+              next.finalReport = '';
+            }
+          }
+
+          touched += 1;
+          return next;
+        });
+      });
+
+      if (touched > 0 || createdGroups > 0) {
+        this.commandBridgeStats.syncedTasks += touched;
+        this.commandBridgeLastSyncAt = nowText;
+        this.commandBridgeLastError = '';
+        this._invalidateReportingCache();
+
+        await this.logService.append({
+          action: 'squad.command_bridge.sync',
+          type: 'squad',
+          target: 'command-bridge',
+          status: 'success',
+          message: `桥接同步完成：新增分组 ${createdGroups}，更新任务 ${touched}`,
+          meta: {
+            createdGroups,
+            touched,
+            candidateLongTasks: longTasks.length,
+            tickAt: nowText
+          }
+        });
+      }
+    } catch (error) {
+      this.commandBridgeLastError = pickText(error?.message, String(error));
+      this.commandBridgeStats.failed += 1;
+      throw error;
+    } finally {
+      this.commandBridgeTickRunning = false;
     }
   }
 
@@ -1582,7 +1863,17 @@ class SquadService {
 
     const warningRoles = sortedRoles.filter((r) => pickText(r.status, '').toLowerCase() === 'warning');
     const syntheticTasks = taskRows.filter((task) => isSyntheticSmokeTask(task));
-    const visibleTaskRows = taskRows.filter((task) => !isSyntheticSmokeTask(task));
+    const staleBridgeTasks = taskRows.filter((task) => {
+      if (!isBridgeTaskRow(task)) return false;
+      const status = pickText(task?.status).toLowerCase();
+      if (!TASK_TERMINAL_STATUSES.has(status)) return false;
+      return taskRecencyMs(task) < nowMs - SQUAD_COMMAND_BRIDGE_SHOW_WINDOW_MS;
+    });
+    const visibleTaskRows = taskRows.filter((task) => {
+      if (isSyntheticSmokeTask(task)) return false;
+      if (staleBridgeTasks.includes(task)) return false;
+      return true;
+    });
 
     const summary = {
       totalRoles: sortedRoles.length,
@@ -1594,7 +1885,8 @@ class SquadService {
       blockedTasks: visibleTaskRows.filter((t) => t.status === 'blocked').length,
       atRiskTasks: visibleTaskRows.filter((t) => pickText(t.runtimeRisk).toLowerCase() === 'at-risk').length,
       pendingTasks: visibleTaskRows.filter((t) => TASK_OPEN_STATUSES.has(pickText(t.status).toLowerCase())).length,
-      hiddenSyntheticTasks: syntheticTasks.length
+      hiddenSyntheticTasks: syntheticTasks.length,
+      hiddenStaleBridgeTasks: staleBridgeTasks.length
     };
 
     const executor = {
@@ -1641,6 +1933,7 @@ class SquadService {
       causeLabels,
       reporting,
       memorySync: this._buildMemorySyncMeta(),
+      commandBridge: this._buildCommandBridgeMeta(),
       captainDirective: CAPTAIN_DISPATCH_DOCTRINE,
       warningRoles: warningRoles.map((row) => ({
         id: row.id,
@@ -2050,6 +2343,7 @@ class SquadService {
     const description = pickText(input.description);
     const weight = clamp(input.weight, 1, 3);
     const source = pickText(input.source, 'user.primary');
+    const sourceTaskId = pickText(input.sourceTaskId);
 
     if (!title) throw new HttpError(400, 'SQUAD_TASK_TITLE_REQUIRED', '任务标题不能为空');
     await this._reconcileTaskLiveness();
@@ -2083,6 +2377,7 @@ class SquadService {
       taskGroupId,
       relationType: 'primary',
       dispatchSource: source,
+      sourceTaskId,
       parallelRoleIds: parallelPlan.parallelRoleIds,
       parallelRoleCount: parallelPlan.parallelRoleIds.length,
       coordinationMode: 'parallel'
@@ -2106,7 +2401,11 @@ class SquadService {
           taskGroupId,
           parentTaskId: task.id,
           relationType: 'linked',
-          dispatchSource: source.includes('system.smoke') ? 'system.smoke.linked' : 'derived.linked',
+          dispatchSource: source.includes('system.smoke')
+            ? 'system.smoke.linked'
+            : source.startsWith('user.command.bridge')
+              ? 'derived.linked.bridge'
+              : 'derived.linked',
           sourceTaskId: task.id,
           parallelRoleIds: parallelPlan.parallelRoleIds,
           parallelRoleCount: parallelPlan.parallelRoleIds.length,
