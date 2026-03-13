@@ -286,6 +286,15 @@ async function main() {
     if (!listedTaskIds.includes(taskId)) {
       throw new Error('expected newly created task to appear in squad task board payload');
     }
+    const createdStateTask = Array.isArray(afterCreateState?.tasks)
+      ? afterCreateState.tasks.find((row) => row?.id === taskId)
+      : null;
+    if (!createdStateTask?.sourceLabel || !String(createdStateTask.sourceLabel).includes('用户')) {
+      throw new Error('expected created task sourceLabel to indicate user-dispatched');
+    }
+    if (typeof createdStateTask?.roleAction !== 'string' || createdStateTask.roleAction.length < 4) {
+      throw new Error('expected created task roleAction summary');
+    }
 
     const heartbeatRes = await request(`/api/squad/task/${encodeURIComponent(taskId)}/heartbeat`, {
       method: 'POST',

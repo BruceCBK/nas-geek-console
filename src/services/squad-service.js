@@ -23,7 +23,9 @@ const AUTO_ROLE_KEYWORDS = {
 const COLLAB_POLICY = {
   'code-claw': ['radar-qa', 'doc-pulse'],
   'ops-tide': ['radar-qa', 'doc-pulse'],
-  'radar-qa': ['doc-pulse']
+  'radar-qa': ['doc-pulse', 'neon-scout'],
+  'neon-scout': ['doc-pulse', 'radar-qa'],
+  'doc-pulse': ['neon-scout', 'radar-qa']
 };
 const TASK_OPEN_STATUSES = new Set(['pending', 'running', 'blocked']);
 const TASK_TERMINAL_STATUSES = new Set(['completed', 'failed']);
@@ -51,6 +53,14 @@ const CAUSE_LABELS = {
   overload: '负载过高',
   collab_lag: '协同卡点',
   execution_stagnation: '执行停滞'
+};
+
+const ROLE_WORK_INTENT = {
+  'neon-scout': '资料检索与事实交叉校验',
+  'code-claw': '实现方案与交付代码变更',
+  'radar-qa': '回归验证与质量门禁',
+  'ops-tide': '稳定性保障与运维闭环',
+  'doc-pulse': '结论沉淀与可读汇报'
 };
 
 const PY311_REPORTER_SCRIPT = path.resolve(__dirname, '../../scripts/squad-reporting-py311.py');
@@ -394,10 +404,16 @@ function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title,
     const manualRole = roleRows.find((r) => r.id === requested);
     if (!manualRole) throw new HttpError(404, 'SQUAD_ROLE_NOT_FOUND', `未找到角色: ${requested}`);
     const manualLoad = getLoad(loadMap, manualRole.id);
+    const collaborationRoleIds = pickCollaborationRoles({
+      primaryRoleId: manualRole.id,
+      scoredRows: [],
+      roles: roleRows,
+      loadMap
+    });
     return {
       role: manualRole,
       matchedRoleIds: [manualRole.id],
-      collaborationRoleIds: [],
+      collaborationRoleIds,
       assignmentMode: 'manual',
       assignmentReason: `manual roleId=${manualRole.id}; ${describeLoad(manualLoad)}`
     };
@@ -438,10 +454,16 @@ function resolveRoleAssignment({ roles = [], tasks = [], requestedRoleId, title,
 
   const picked = pickLeastLoadedRole(roleRows, loadMap);
   const pickedLoad = getLoad(loadMap, picked.id);
+  const collaborationRoleIds = pickCollaborationRoles({
+    primaryRoleId: picked.id,
+    scoredRows: [],
+    roles: roleRows,
+    loadMap
+  });
   return {
     role: picked,
     matchedRoleIds: [],
-    collaborationRoleIds: [],
+    collaborationRoleIds,
     assignmentMode: 'auto.balance',
     assignmentReason: `auto balance(no keyword) -> ${picked.id}; ${describeLoad(pickedLoad)}`
   };
@@ -457,7 +479,9 @@ function buildTaskRow({
   assignmentReason,
   taskGroupId,
   parentTaskId,
-  relationType = 'primary'
+  relationType = 'primary',
+  dispatchSource = 'user.primary',
+  sourceTaskId = ''
 }) {
   const ts = nowIso();
   return {
@@ -471,6 +495,8 @@ function buildTaskRow({
     taskGroupId: pickText(taskGroupId),
     parentTaskId: pickText(parentTaskId),
     relationType,
+    dispatchSource: pickText(dispatchSource, relationType === 'linked' ? 'derived.linked' : 'user.primary'),
+    sourceTaskId: pickText(sourceTaskId, parentTaskId),
     weight,
     status: 'running',
     progressPercent: 5,
@@ -545,6 +571,68 @@ function taskRecencyMs(task = {}) {
     parseIsoMs(task?.gradedAt),
     0
   );
+}
+
+function taskStatusLabel(status) {
+  const key = pickText(status).toLowerCase();
+  if (key === 'running') return '进行中';
+  if (key === 'pending') return '待处理';
+  if (key === 'blocked') return '阻塞';
+  if (key === 'completed') return '已完成';
+  if (key === 'failed') return '已失败';
+  return key || '未知';
+}
+
+function stripLinkedPrefix(title) {
+  return pickText(title).replace(/^\[协同\]\s*/u, '');
+}
+
+function taskSourceLabel(task = {}) {
+  const source = pickText(task?.dispatchSource).toLowerCase();
+  const relation = pickText(task?.relationType, 'primary').toLowerCase();
+  if (source.startsWith('user')) return '用户主派发';
+  if (source.startsWith('derived') || relation === 'linked') return '协同衍生任务';
+  if (source.startsWith('system')) return '系统自动派发';
+  return relation === 'linked' ? '协同衍生任务' : '队内任务';
+}
+
+function taskRoleAction(task = {}) {
+  const roleId = pickText(task?.roleId);
+  const intent = pickText(ROLE_WORK_INTENT[roleId], '推进任务执行');
+  const cleanTitle = stripLinkedPrefix(task?.title);
+  if (pickText(task?.relationType, 'primary').toLowerCase() === 'linked') {
+    return `${intent}，协同支援主任务《${cleanTitle}》`;
+  }
+  return `${intent}，主责推进《${cleanTitle}》`;
+}
+
+function taskDisplayTitle(task = {}) {
+  const cleanTitle = stripLinkedPrefix(task?.title);
+  if (pickText(task?.relationType, 'primary').toLowerCase() === 'linked') {
+    return `协同任务｜${cleanTitle}`;
+  }
+  return `主线任务｜${cleanTitle}`;
+}
+
+function buildTaskGroupRosterMap(tasks = []) {
+  const groups = new Map();
+  for (const task of toArray(tasks)) {
+    const gid = pickText(task?.taskGroupId);
+    if (!gid) continue;
+    if (!groups.has(gid)) groups.set(gid, []);
+    groups.get(gid).push(task);
+  }
+
+  const rosterMap = new Map();
+  for (const [gid, rows] of groups.entries()) {
+    const text = rows
+      .slice()
+      .sort((a, b) => taskRecencyMs(b) - taskRecencyMs(a))
+      .map((row) => `${pickText(row?.roleName, row?.roleId, '-')}(${taskStatusLabel(row?.status)})`)
+      .join(' · ');
+    rosterMap.set(gid, text);
+  }
+  return rosterMap;
 }
 
 function toCstDateKey(now = new Date()) {
@@ -1346,10 +1434,22 @@ class SquadService {
       causeLabels
     });
 
+    const groupRosterMap = buildTaskGroupRosterMap(taskRows);
     const boardTasks = taskRows
       .slice()
       .sort((a, b) => taskRecencyMs(b) - taskRecencyMs(a))
-      .slice(0, SQUAD_STATE_TASK_MAX);
+      .slice(0, SQUAD_STATE_TASK_MAX)
+      .map((task) => {
+        const sourceTaskId = pickText(task?.sourceTaskId, task?.parentTaskId);
+        return {
+          ...task,
+          displayTitle: taskDisplayTitle(task),
+          sourceLabel: taskSourceLabel(task),
+          sourceTaskId,
+          roleAction: taskRoleAction(task),
+          collaborationRoster: pickText(groupRosterMap.get(pickText(task?.taskGroupId)))
+        };
+      });
 
     return {
       roles: sortedRoles,
@@ -1539,7 +1639,8 @@ class SquadService {
       assignmentMode: assignment.assignmentMode,
       assignmentReason: `${assignment.assignmentReason} ｜ ${CAPTAIN_DISPATCH_DOCTRINE}`,
       taskGroupId,
-      relationType: 'primary'
+      relationType: 'primary',
+      dispatchSource: 'user.primary'
     });
 
     const linkedTasks = assignment.collaborationRoleIds
@@ -1559,7 +1660,9 @@ class SquadService {
           assignmentReason: linkedReason,
           taskGroupId,
           parentTaskId: task.id,
-          relationType: 'linked'
+          relationType: 'linked',
+          dispatchSource: 'derived.linked',
+          sourceTaskId: task.id
         });
       });
 

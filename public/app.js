@@ -1810,7 +1810,7 @@ function renderSquadTasks() {
     line.className = 'list-line';
 
     const title = document.createElement('strong');
-    title.textContent = `${pickText(task.title)} · ${pickText(task.roleName)}`;
+    title.textContent = `${pickText(task.displayTitle, task.title)} · ${pickText(task.roleName)}`;
 
     const taskStatus = pickText(task.status, 'pending').toLowerCase();
     const badge = buildBadge(taskStatus);
@@ -1821,7 +1821,7 @@ function renderSquadTasks() {
 
     const detail = document.createElement('small');
     const relation = pickText(task.relationType, 'primary') === 'linked' ? '协同子任务' : '主任务';
-    detail.textContent = `ID ${pickText(task.id)} · ${relation} · 权重 ${formatNumber(task.weight)} · Δ ${Number(task.scoreDelta) > 0 ? '+' : ''}${formatNumber(task.scoreDelta)}`;
+    detail.textContent = `ID ${pickText(task.id)} · ${relation} · 来源 ${pickText(task.sourceLabel, relation === 'linked' ? '协同衍生任务' : '用户主派发')} · 权重 ${formatNumber(task.weight)} · Δ ${Number(task.scoreDelta) > 0 ? '+' : ''}${formatNumber(task.scoreDelta)}`;
 
     const judge = document.createElement('small');
     const reviewText =
@@ -1838,6 +1838,24 @@ function renderSquadTasks() {
 
     line.append(title, badge);
     item.append(line, detail, judge);
+
+    if (pickText(task.sourceTaskId)) {
+      const lineage = document.createElement('small');
+      lineage.textContent = `衍生来源任务ID：${pickText(task.sourceTaskId)}`;
+      item.append(lineage);
+    }
+
+    if (pickText(task.roleAction)) {
+      const action = document.createElement('small');
+      action.textContent = `本虾职责：${pickText(task.roleAction)}`;
+      item.append(action);
+    }
+
+    if (pickText(task.collaborationRoster)) {
+      const roster = document.createElement('small');
+      roster.textContent = `协作编队：${pickText(task.collaborationRoster)}`;
+      item.append(roster);
+    }
 
     if (pickText(task.description)) {
       const desc = document.createElement('small');
